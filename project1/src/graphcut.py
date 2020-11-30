@@ -104,10 +104,15 @@ class GraphCut:
 
         self._border_size = 32  # for max error calc
 
-        self.output = np.zeros(out_size + (ch,))
+        # self.output = np.zeros(out_size + (ch,))
+        self.refine_step = 1
 
         ## visualization params
         self.seam_size = 1
+
+    @property
+    def output(self):
+        return self._global_nodes.color_A.copy()
 
     @staticmethod
     def get_gradient(img):
@@ -124,25 +129,31 @@ class GraphCut:
         return np.linalg.norm((dst - src) / 255., axis=-1)
 
     
-    def get_seam_max_error(self):
-        in_region = np.zeros_like(self._global_nodes.empty)
-        in_region[self._border_size : -self._border_size, self._border_size : -self._border_size] = True
-        r_max = np.amax(self._global_nodes.right_cost, where=in_region & ~self._global_nodes.empty & self._global_nodes.on_seam_right)
-        b_max = np.amax(self._global_nodes.bottom_cost, where=in_region & ~self._global_nodes.empty & self._global_nodes.on_seam_bottom)
-        return max(r_max, b_max)
-    
-    def get_entire_patch_ssd(self):
-        """Compute sum-of-squared-differences (accelerated)
-        \frac{1}{|A_t|} \sum_{p \in A_t} | I(p) - O(p+t) |^2
-        = \sum_p I^2(p) + \sum_p O^2(p + t) - ***2 \sum_p I(p)O(p+t)*** --> 2D correlation
-        """
-        O = self._global_nodes.color_A / 255.
-        I = self._input / 255.
+    def get_seam_max_error_idx(self):
+        max_err = -1
+        x, y = -1, -1
+        for j in range(self._border_size, self._output_h - self._border_size):
+            for i in range(self._border_size, self._output_w - self._border_size):
+                if ~self._global_nodes[j, i].empty:
+                    name = None
+                    if self._global_nodes[j, i].on_seam_right:
+                        name = 'right'
+                    elif self._global_nodes[j, i].on_seam_bottom:
+                        name = 'bottom'
+                    if name is not None:
+                        err = getattr(self._global_nodes[j, i], f'{name}_cost')
+                        if err > max_err:
+                            max_err = err
+                            x, y = i, j
+        return x, y
+
+    @staticmethod
+    def _get_ssd_impl(O, I, O_mask, I_mask, w_lo, w_hi, h_lo, h_hi):
         O_square = (O ** 2).sum(-1)
-        O_square = fftconvolve(O_square, np.ones((self._input_h, self._input_w)))
+        O_square = fftconvolve(O_square, ~I_mask)
         I_square = (I ** 2).sum(-1)
-        I_square = fftconvolve(I_square[::-1, ::-1], ~self._global_nodes.empty)
-        Area = fftconvolve(~self._global_nodes.empty, np.ones((self._input_h, self._input_w)))
+        I_square = fftconvolve(I_square[::-1, ::-1], ~O_mask)
+        Area = fftconvolve(~O_mask, ~I_mask)
         CR = []
         for ch in range(3):
             CR.append(fftconvolve(O[..., ch], I[::-1, ::-1, ch]))
@@ -155,12 +166,31 @@ class GraphCut:
         
         def get_value(x, y):
             cost = 0
-            if -self._input_w + 1 <= x < self._output_w and -self._input_h + 1 <= y < self._output_h:
-                cost = COST[y + self._input_h - 1, x + self._input_w - 1]
+            if w_lo <= x < w_hi and h_lo <= y < h_hi:
+                cost = COST[y - h_lo, x - w_lo]
             return cost
             
         return get_value
 
+    
+    def get_sub_patch_ssd(self, x, y, size_x, size_y):
+        I = self._global_nodes.color_A[y:y+size_y, x:x+size_x] / 255.
+        O = self._input / 255.
+        I_mask = self._global_nodes.empty[y:y+size_y, x:x+size_x]
+        O_mask = np.zeros(O.shape[:-1], dtype=np.bool)
+        return self._get_ssd_impl(O, I, O_mask, I_mask, -size_x + 1, self._input_w, -size_y + 1, self._input_h)
+
+    
+    def get_entire_patch_ssd(self):
+        """Compute sum-of-squared-differences (accelerated)
+        \frac{1}{|A_t|} \sum_{p \in A_t} | I(p) - O(p+t) |^2
+        = \sum_p I^2(p) + \sum_p O^2(p + t) - ***2 \sum_p I(p)O(p+t)*** --> 2D correlation
+        """
+        O = self._global_nodes.color_A / 255.
+        I = self._input / 255.
+        O_mask = self._global_nodes.empty
+        I_mask = np.zeros(I.shape[:-1], dtype=np.bool)
+        return self._get_ssd_impl(O, I, O_mask, I_mask, -self._input_w + 1, self._output_w, -self._input_h + 1, self._output_h)         
     
     @deprecate
     def get_ssd_slow(self, x, y):
@@ -179,6 +209,21 @@ class GraphCut:
             return 0
         else:
             return cost / num_pix
+            
+            
+    @deprecate
+    def get_ssd_sub_patch_slow(self, x, y, input_x, input_y, size_x, size_y):
+        cost = 0
+        num_pix = 0
+        for j in range(size_y):
+            for i in range(size_x):
+                if not self._global_nodes[y + j, x + i].empty:
+                    cost += (((self._global_nodes[y + j, x + i].color_A - self._input[input_y + j, input_x + i]) / 255.) ** 2).sum()
+                    num_pix += 1
+        if num_pix == 0:
+            return 0
+        else:
+            return cost / num_pix
 
 
     def draw_seams(self, out_img):
@@ -192,18 +237,25 @@ class GraphCut:
                         out_img[rr, cc] = [255, 255, 0]
 
     def on_output(self, output, is_final_output=False):
+        plt.figure()
+        plt.subplot(1, 2, 1)
+        plt.tight_layout()
+        plt.axis('off')
+        plt.imshow(output.astype(np.uint8))
         self.draw_seams(output)
+        plt.subplot(1, 2, 2)
+        plt.tight_layout()
+        plt.axis('off')
         plt.imshow(output.astype(np.uint8))
         plt.show()
     
     def fill_output(self, step_x, step_y, method, **kwargs):
-        assert method in ['random', 'entire_match']
+        assert method in ['random', 'entire_match', 'fixed']
         
         K = kwargs.get('k', 1.0)
 
         self._patch_cnt = 0
         output = None
-        method = 'entire_match'  # TODO:
         print("==== Initializing fill ====")
         if method == 'random':
             offset_y = 0
@@ -218,8 +270,6 @@ class GraphCut:
                     if y < self._output_h and self.insert_patch(x, y, self._input_w, self._input_h):
                         self._patch_cnt += 1
                         print(f"Patch count: {self._patch_cnt}")
-                        output = self._global_nodes.color_A.copy()
-                        self.on_output(output)
                     
                     x += (step_x + np.random.randint(0, step_x))
                     y = offset_y - (step_y + np.random.randint(0, step_y))
@@ -245,8 +295,6 @@ class GraphCut:
                     if y < self._output_h and self.insert_patch(x, y, self._input_w, self._input_h):
                         self._patch_cnt += 1
                         print(f"Patch count: {self._patch_cnt}")
-                        output = self._global_nodes.color_A.copy()
-                        self.on_output(output)
                     # sample min err
                     ssd = self.get_entire_patch_ssd()
                     err_list = []
@@ -277,9 +325,72 @@ class GraphCut:
 
                 if y >= self._output_h:
                     break
-
+        elif method == 'fixed':
+            for y in range(0, self._output_h, step_y):
+                for x in range(0, self._output_w, step_x):
+                    print(f"x:{x}, y:{y}")
+                    if self.insert_patch(x, y, self._input_w, self._input_h):
+                        self._patch_cnt += 1
+                        print(f"Patch count: {self._patch_cnt}")
+                        output = self._global_nodes.color_A.copy()
+                        self.on_output(output)
 
         self._is_filled = True
+        output = self._global_nodes.color_A.copy()
+        self.on_output(output)
+
+    def refinement(self, radius):
+        # refine via sub-patch matching
+        print("---- Texture refinement ----")
+
+        max_err_x, max_err_y = self.get_seam_max_error_idx()
+        if max_err_x != -1 and max_err_y != -1:
+            # rr = (radius - 2) + np.random.randint(0, 5)
+            rr = radius
+            print(f"Radius: {rr}")
+            min_err = float('inf')
+            min_err_i, min_err_j = -1, -1
+
+            x = max_err_x - rr // 2
+            y = max_err_y - rr // 2
+            v1x, v1y = max(0, x), max(0, y)
+            v2x, v2y = min(self._output_w, x + rr), min(self._output_h, y + rr)
+            sx, sy = v2x - v1x, v2y - v1y
+
+            # ssd = self.get_sub_patch_ssd(v1x - rr, v1y - rr, 2 * rr + sx, 2 * rr + sy)
+            ssd = self.get_sub_patch_ssd(v1x, v1y, sx, sy)
+
+            #for j in range(0, self._input_h - 3 * rr, self.refine_step):
+            #    for i in range(0, self._input_w - 3 * rr, self.refine_step):
+            for j in range(sy, self._input_h - 2 * sy, self.refine_step):
+                for i in range(sx, self._input_w - 2 * sx, self.refine_step):
+                    err = ssd(i, j)
+                    if err < min_err:
+                        min_err = err
+                        min_err_i = i
+                        min_err_j = j
+            
+            # min_err_i += rr
+            # min_err_j += rr
+
+            # min_err_x, min_err_y = v1x - rr, v1y - rr
+            min_err_x = v1x - min_err_i
+            min_err_y = v1y - min_err_j
+            min_sx, min_sy = 2 * rr + sx, 2 * rr + sy
+            
+            crop_x, crop_y = max(0, min_err_x), max(0, min_err_y)
+            
+            input_x = max_err_x - rr // 2 - crop_x
+            input_y = max_err_y - rr // 2 - crop_y
+
+            min_err_x, min_err_y = max(0, min_err_x), max(0, min_err_y)
+
+            # self.insert_patch(min_err_x, min_err_y, min_sx, min_sy, False, rr, min_err_x, min_err_y, input_x, input_y, min_err_i - rr, min_err_j - rr)
+            self.insert_patch(min_err_x, min_err_y, self._input_w, self._input_h, False, rr, min_err_x, min_err_y, input_x, input_y)
+
+            self._patch_cnt += 1
+            print(f"Patch count: {self._patch_cnt}")
+
 
     def insert_patch(self, x, y, sx, sy, is_filling=True, radius=0, tx=0, ty=0, input_x=0, input_y=0, px=0, py=0) -> bool:
         """[summary]
@@ -520,6 +631,3 @@ class GraphCut:
                     
 
         return True
-
-
-        
