@@ -17,5 +17,5 @@ if __name__ == '__main__':
     res_h = int(round(h * args.h_ratio))
     res_w = int(round(w * args.w_ratio))
     blender = GraphCut(im, (res_h, res_w))
-    blender.fill_output(w // 2, h // 2, args.placer)
+    blender.fill_output(w // 3, h // 3, args.placer)
 

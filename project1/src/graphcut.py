@@ -3,6 +3,9 @@ import numpy as np
 import maxflow
 import warnings
 import matplotlib.pyplot as plt
+from numpy import fft
+from numpy.lib.utils import deprecate
+from scipy.signal import fftconvolve
 
 class AttrCtrl:
     def __init__(self):
@@ -90,7 +93,7 @@ class GraphCut:
         self._input_h, self._input_w, ch = im.shape
         self._output_h, self._output_w = out_size
         self._global_nodes = PixelNodeSet(*out_size)
-        self._INFTY = 1e100
+        self._INFTY = float('inf')
         self._MIN_CAP = 1e-10
         self._patch_cnt = 0
         self._is_filled = False
@@ -104,7 +107,7 @@ class GraphCut:
         self.output = np.zeros(out_size + (ch,))
 
         ## visualization params
-        self.seam_size = 2
+        self.seam_size = 1
 
     @staticmethod
     def get_gradient(img):
@@ -120,17 +123,89 @@ class GraphCut:
     def rgb_l1_dist(src, dst):
         return np.linalg.norm((dst - src) / 255., axis=-1)
 
+    
+    def get_seam_max_error(self):
+        in_region = np.zeros_like(self._global_nodes.empty)
+        in_region[self._border_size : -self._border_size, self._border_size : -self._border_size] = True
+        r_max = np.amax(self._global_nodes.right_cost, where=in_region & ~self._global_nodes.empty & self._global_nodes.on_seam_right)
+        b_max = np.amax(self._global_nodes.bottom_cost, where=in_region & ~self._global_nodes.empty & self._global_nodes.on_seam_bottom)
+        return max(r_max, b_max)
+    
+    def get_entire_patch_ssd(self):
+        """Compute sum-of-squared-differences (accelerated)
+        \frac{1}{|A_t|} \sum_{p \in A_t} | I(p) - O(p+t) |^2
+        = \sum_p I^2(p) + \sum_p O^2(p + t) - ***2 \sum_p I(p)O(p+t)*** --> 2D correlation
+        """
+        O = self._global_nodes.color_A / 255.
+        I = self._input / 255.
+        O_square = (O ** 2).sum(-1)
+        O_square = fftconvolve(O_square, np.ones((self._input_h, self._input_w)))
+        I_square = (I ** 2).sum(-1)
+        I_square = fftconvolve(I_square[::-1, ::-1], ~self._global_nodes.empty)
+        Area = fftconvolve(~self._global_nodes.empty, np.ones((self._input_h, self._input_w)))
+        CR = []
+        for ch in range(3):
+            CR.append(fftconvolve(O[..., ch], I[::-1, ::-1, ch]))
+        CR = np.dstack(CR).sum(-1)
+
+        div_area = Area.copy()
+        div_area[div_area < 1e-3] = 1
+        COST = (O_square + I_square - 2 * CR) / div_area
+        COST[Area < 1e-3] = 0
+        
+        def get_value(x, y):
+            cost = 0
+            if -self._input_w + 1 <= x < self._output_w and -self._input_h + 1 <= y < self._output_h:
+                cost = COST[y + self._input_h - 1, x + self._input_w - 1]
+            return cost
+            
+        return get_value
+
+    
+    @deprecate
+    def get_ssd_slow(self, x, y):
+        v1x, v1y = max(0, x) - x, max(0, y) - y
+        v2x, v2y = min(self._output_w, x + self._input_w) - x, min(self._output_h, y + self._input_h) - y
+        sx, sy = v2x - v1x, v2y - v1y
+        x, y = max(0, x), max(0, y)
+        cost = 0
+        num_pix = 0
+        for j, cj in zip(range(v1y, v2y), range(sy)):
+            for i, ci in zip(range(v1x, v2x), range(sx)):
+                if not self._global_nodes[y + cj, x + ci].empty:
+                    cost += (((self._global_nodes[y + cj, x + ci].color_A - self._input[j, i]) / 255.) ** 2).sum()
+                    num_pix += 1
+        if num_pix == 0:
+            return 0
+        else:
+            return cost / num_pix
+
+
     def draw_seams(self, out_img):
         indices = np.where(~self._global_nodes.empty & (self._global_nodes.on_seam_right | self._global_nodes.on_seam_bottom))
-        for ind in indices:
-            pass
+        for r, c in zip(*indices):
+            for j in range(-self.seam_size, self.seam_size):
+                for i in range(-self.seam_size, self.seam_size):
+                    rr = r + j
+                    cc = c + i
+                    if 0 <= rr < self._output_h and 0 <= cc < self._output_w:
+                        out_img[rr, cc] = [255, 255, 0]
+
+    def on_output(self, output, is_final_output=False):
+        self.draw_seams(output)
+        plt.imshow(output.astype(np.uint8))
+        plt.show()
     
-    def fill_output(self, step_x, step_y, method):
-        assert method in ['random', 'entire_min_error', 'entire_random']
+    def fill_output(self, step_x, step_y, method, **kwargs):
+        assert method in ['random', 'entire_match']
+        
+        K = kwargs.get('k', 1.0)
+
         self._patch_cnt = 0
+        output = None
+        method = 'entire_match'  # TODO:
+        print("==== Initializing fill ====")
         if method == 'random':
-            output = None
-            print("==== Initializing fill ====")
             offset_y = 0
             y = offset_y - (step_y + np.random.randint(0, step_y))
             while True:
@@ -144,10 +219,7 @@ class GraphCut:
                         self._patch_cnt += 1
                         print(f"Patch count: {self._patch_cnt}")
                         output = self._global_nodes.color_A.copy()
-                        self.draw_seams(output)
-
-                        plt.imshow(output.astype(np.uint8))
-                        plt.show()
+                        self.on_output(output)
                     
                     x += (step_x + np.random.randint(0, step_x))
                     y = offset_y - (step_y + np.random.randint(0, step_y))
@@ -160,13 +232,54 @@ class GraphCut:
 
                 if y >= self._output_h:
                     break
-        elif method == 'entire_min_error':
-            pass # TODO:
-        elif method == 'entire_random':
-            pass # TODO:
+        elif method == 'entire_match':
+            assert 0 < K <= 1.0
+            offset_y = 0
+            y = offset_y - (step_y + np.random.randint(0, step_y))
+            x = -(step_x + np.random.randint(0, step_x))
+
+            while True:
+                print("--- Fill incoming row ----")
+                while True:
+                    print(f"x:{x}, y:{y}")
+                    if y < self._output_h and self.insert_patch(x, y, self._input_w, self._input_h):
+                        self._patch_cnt += 1
+                        print(f"Patch count: {self._patch_cnt}")
+                        output = self._global_nodes.color_A.copy()
+                        self.on_output(output)
+                    # sample min err
+                    ssd = self.get_entire_patch_ssd()
+                    err_list = []
+                    for j in range(step_y):
+                        for i in range(step_x):
+                            test_x = x + step_x + i
+                            test_y = offset_y - step_y - j
+                            err = ssd(test_x, test_y)
+                            err_list.append((err, test_x, test_y))
+                    sorted(err_list, key=lambda x : x[0])
+                    n = np.random.randint(0, len(err_list) * K)
+                    x, y = err_list[n][1:]
+
+                    if x >= self._output_w:
+                        break
+                
+                offset_y += step_y
+                err_list = []
+                for j in range(step_y):
+                    for i in range(step_x):
+                        test_x = -step_x + i
+                        test_y = offset_y - step_y - j
+                        err = ssd(test_x, test_y)
+                        err_list.append((err, test_x, test_y))
+                sorted(err_list, key=lambda x : x[0])
+                n = np.random.randint(0, len(err_list) * K)
+                x, y = err_list[n][1:]
+
+                if y >= self._output_h:
+                    break
+
 
         self._is_filled = True
-
 
     def insert_patch(self, x, y, sx, sy, is_filling=True, radius=0, tx=0, ty=0, input_x=0, input_y=0, px=0, py=0) -> bool:
         """[summary]
@@ -186,7 +299,7 @@ class GraphCut:
         v2x, v2y = min(self._output_w, x + sx) - x, min(self._output_h, y + sy) - y
 
         sx, sy = v2x - v1x, v2y - v1y
-        if sx == 0 or sy == 0:
+        if sx <= 1 or sy <= 1:
             warnings.warn("Patch outsize of output image. Do nothing.")
             return False
         
@@ -313,9 +426,6 @@ class GraphCut:
         if is_filling:
             for j in range(sy):
                 for i in range(sx):
-                    if self._global_nodes[y + j, x + i].empty:
-                        continue
-                    # A not empty, B empty --> sink
                     neighbors = [(i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)]
                     for nb in neighbors:
                         ni, nj = nb
