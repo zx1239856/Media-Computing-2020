@@ -102,7 +102,9 @@ class GraphCut:
         # SSD computation step
         self._ssdStep = 3
 
-        self._border_size = 32  # for max error calc
+        self._border_size = 1  # for max error calc
+
+        self._is_refined = np.zeros((self._output_h, self._output_w), dtype=np.bool)
 
         # self.output = np.zeros(out_size + (ch,))
         self.refine_step = 1
@@ -134,7 +136,7 @@ class GraphCut:
         x, y = -1, -1
         for j in range(self._border_size, self._output_h - self._border_size):
             for i in range(self._border_size, self._output_w - self._border_size):
-                if ~self._global_nodes[j, i].empty:
+                if not self._global_nodes[j, i].empty and not self._is_refined[j, i]:
                     name = None
                     if self._global_nodes[j, i].on_seam_right:
                         name = 'right'
@@ -237,16 +239,34 @@ class GraphCut:
                         out_img[rr, cc] = [255, 255, 0]
 
     def on_output(self, output, is_final_output=False):
-        plt.figure()
-        plt.subplot(1, 2, 1)
+        plt.figure(figsize=(32, 10))
+        plt.subplot(1, 3, 1)
         plt.tight_layout()
         plt.axis('off')
         plt.imshow(output.astype(np.uint8))
         self.draw_seams(output)
-        plt.subplot(1, 2, 2)
+        plt.subplot(1, 3, 2)
         plt.tight_layout()
         plt.axis('off')
         plt.imshow(output.astype(np.uint8))
+        plt.subplot(1, 3, 3)
+        plt.tight_layout()
+        plt.axis('off')
+        err_map = np.zeros((self._output_h, self._output_w))
+        for j in range(self._output_h):
+            for i in range(self._output_w):
+                if ~self._global_nodes[j, i].empty:
+                    name = None
+                    if self._global_nodes[j, i].on_seam_right:
+                        name = 'right'
+                    elif self._global_nodes[j, i].on_seam_bottom:
+                        name = 'bottom'
+                    if name is not None:
+                        err = getattr(self._global_nodes[j, i], f'{name}_cost')
+                        err_map[j, i] = err
+        max_err = np.max(err_map)
+        err_map /= max_err if max_err > 1e-2 else 1
+        plt.imshow(err_map)
         plt.show()
     
     def fill_output(self, step_x, step_y, method, **kwargs):
@@ -295,33 +315,53 @@ class GraphCut:
                     if y < self._output_h and self.insert_patch(x, y, self._input_w, self._input_h):
                         self._patch_cnt += 1
                         print(f"Patch count: {self._patch_cnt}")
+                        # output = self._global_nodes.color_A.copy()
+                        # self.on_output(output)
                     # sample min err
                     ssd = self.get_entire_patch_ssd()
-                    err_list = []
+
+                    min_x = x + (step_x + np.random.randint(step_x))
+                    min_y = offset_y - (step_y + np.random.randint(step_y))
+                    min_err = ssd(min_x, min_y)
+
+                    # err_list = []
                     for j in range(step_y):
                         for i in range(step_x):
                             test_x = x + step_x + i
                             test_y = offset_y - step_y - j
                             err = ssd(test_x, test_y)
-                            err_list.append((err, test_x, test_y))
-                    sorted(err_list, key=lambda x : x[0])
-                    n = np.random.randint(0, len(err_list) * K)
-                    x, y = err_list[n][1:]
+                            if err < min_err:
+                                min_err = err
+                                min_x, min_y = test_x, test_y
+                            # err_list.append((err, test_x, test_y))
+                    # sorted(err_list, key=lambda x : x[0])
+                    # n = np.random.randint(0, len(err_list) * K)
+                    # x, y = err_list[n][1:]
+                    x, y = min_x, min_y
 
                     if x >= self._output_w:
                         break
                 
                 offset_y += step_y
-                err_list = []
+
+                min_x = -(step_x + np.random.randint(step_x))
+                min_y = offset_y - (step_y + np.random.randint(step_y))
+                min_err = ssd(min_x, min_y)
+
+                # err_list = []
                 for j in range(step_y):
                     for i in range(step_x):
                         test_x = -step_x + i
                         test_y = offset_y - step_y - j
                         err = ssd(test_x, test_y)
-                        err_list.append((err, test_x, test_y))
-                sorted(err_list, key=lambda x : x[0])
-                n = np.random.randint(0, len(err_list) * K)
-                x, y = err_list[n][1:]
+                        if err < min_err:
+                            min_err = err
+                            min_x, min_y = test_x, test_y
+                        # err_list.append((err, test_x, test_y))
+                # sorted(err_list, key=lambda x : x[0])
+                # n = np.random.randint(0, len(err_list) * K)
+                # x, y = err_list[n][1:]
+                x, y = min_x, min_y
 
                 if y >= self._output_h:
                     break
@@ -339,130 +379,122 @@ class GraphCut:
         output = self._global_nodes.color_A.copy()
         self.on_output(output)
 
-    def refinement(self, radius):
+    def refinement(self, diameter):
         # refine via sub-patch matching
         print("---- Texture refinement ----")
 
         max_err_x, max_err_y = self.get_seam_max_error_idx()
         if max_err_x != -1 and max_err_y != -1:
-            # rr = (radius - 2) + np.random.randint(0, 5)
-            rr = radius
-            print(f"Radius: {rr}")
+            dd = diameter
+            print(f"diameter: {dd}")
             min_err = float('inf')
             min_err_i, min_err_j = -1, -1
 
-            x = max_err_x - rr // 2
-            y = max_err_y - rr // 2
+            x = max_err_x - dd // 2
+            y = max_err_y - dd // 2
             v1x, v1y = max(0, x), max(0, y)
-            v2x, v2y = min(self._output_w, x + rr), min(self._output_h, y + rr)
+            v2x, v2y = min(self._output_w, x + dd), min(self._output_h, y + dd)
             sx, sy = v2x - v1x, v2y - v1y
 
-            # ssd = self.get_sub_patch_ssd(v1x - rr, v1y - rr, 2 * rr + sx, 2 * rr + sy)
+            print(f"Center for max err: ({max_err_x}, {max_err_y})")
+
+            if sx <= 1 or sy <= 1:
+                warnings.warn('Patch for improvement too small')
+                return
+
             ssd = self.get_sub_patch_ssd(v1x, v1y, sx, sy)
 
-            #for j in range(0, self._input_h - 3 * rr, self.refine_step):
-            #    for i in range(0, self._input_w - 3 * rr, self.refine_step):
-            for j in range(sy, self._input_h - 2 * sy, self.refine_step):
-                for i in range(sx, self._input_w - 2 * sx, self.refine_step):
+            for j in range(sy, self._input_h - sy, self.refine_step):
+                for i in range(sx, self._input_w - sx, self.refine_step):
                     err = ssd(i, j)
                     if err < min_err:
                         min_err = err
                         min_err_i = i
                         min_err_j = j
             
-            # min_err_i += rr
-            # min_err_j += rr
-
-            # min_err_x, min_err_y = v1x - rr, v1y - rr
             min_err_x = v1x - min_err_i
             min_err_y = v1y - min_err_j
-            min_sx, min_sy = 2 * rr + sx, 2 * rr + sy
             
-            crop_x, crop_y = max(0, min_err_x), max(0, min_err_y)
-            
-            input_x = max_err_x - rr // 2 - crop_x
-            input_y = max_err_y - rr // 2 - crop_y
-
-            min_err_x, min_err_y = max(0, min_err_x), max(0, min_err_y)
-
-            # self.insert_patch(min_err_x, min_err_y, min_sx, min_sy, False, rr, min_err_x, min_err_y, input_x, input_y, min_err_i - rr, min_err_j - rr)
-            self.insert_patch(min_err_x, min_err_y, self._input_w, self._input_h, False, rr, min_err_x, min_err_y, input_x, input_y)
+            # crop_x, crop_y = max(0, min_err_x), max(0, min_err_y)
+            # input_x = max_err_x - dd // 2 - crop_x
+            # input_y = max_err_y - dd // 2 - crop_y
+            # min_err_x, min_err_y = max(0, min_err_x), max(0, min_err_y)
+            print(f"Input ({min_err_j} : {min_err_j + dd}, {min_err_i} : {min_err_i + dd}) applied to output ({min_err_x}, {min_err_y})")
+            mask = np.zeros((self._input_h, self._input_w), dtype=np.bool)
+            mask[min_err_j: min_err_j + dd, min_err_i: min_err_i + dd] = True
+            self.insert_patch(min_err_x, min_err_y, self._input_w, self._input_h, mask)
+            self._is_refined[v1y:v2y, v1x:v2x] = True
 
             self._patch_cnt += 1
             print(f"Patch count: {self._patch_cnt}")
 
 
-    def insert_patch(self, x, y, sx, sy, is_filling=True, radius=0, tx=0, ty=0, input_x=0, input_y=0, px=0, py=0) -> bool:
+    def insert_patch(self, tx, ty, sx, sy, mask=None) -> bool:
         """[summary]
-
-        Args:
-            x (int): x coord in output image
-            y (int): y coord in output image
-            sx (int): patch width
-            sy (int): patch height
-            tx (int): [description]
-            ty (int): [description]
-            is_filling (bool, optional): is_filling. Defaults to True.
-            px (int, optional): x offset in texture. Defaults to 0.
-            py (int, optional): y offset in texture. Defaults to 0.
+            Normally, we paste input texture to (tx : tx + sx, ty : ty + sy) of output (modulated by output size, though)
+            In refinement case, we need to select a center region from which we add SINK edges in graph (corresponding to pixels that must be copied from B)
+            this area is denoted by mask of input patch, translated by (tx, ty) to output
         """
-        v1x, v1y = max(0, x) - x, max(0, y) - y
-        v2x, v2y = min(self._output_w, x + sx) - x, min(self._output_h, y + sy) - y
+        v1x, v1y = max(0, tx) - tx, max(0, ty) - ty
+        v2x, v2y = min(self._output_w, tx + sx) - tx, min(self._output_h, ty + sy) - ty
 
         sx, sy = v2x - v1x, v2y - v1y
         if sx <= 1 or sy <= 1:
             warnings.warn("Patch outsize of output image. Do nothing.")
             return False
         
-        B = self._input[v1y + py: v2y + py, v1x + px : v2x + px]
-        B_gr_x = self._input_gradient_x[v1y + py : v2y + py, v1x + px : v2x + px]
-        B_gr_y = self._input_gradient_y[v1y + py : v2y + py, v1x + px : v2x + px]
-        
-        x, y = max(0, x), max(0, y)
+        B = self._input[v1y:v2y, v1x:v2x]
+        B_gr_x = self._input_gradient_x[v1y:v2y, v1x:v2x]
+        B_gr_y = self._input_gradient_y[v1y:v2y, v1x:v2x]
 
-        non_overlaps = np.count_nonzero(self._global_nodes.empty[y:y+sy, x:x+sx])
+        if mask is not None:
+            mask = mask[v1y:v2y, v1x:v2x]
+        
+        tx, ty = max(0, tx), max(0, ty)
+
+        non_overlaps = np.count_nonzero(self._global_nodes.empty[ty:ty+sy, tx:tx+sx])
         if non_overlaps == sx * sy:
             # no overlap, just fill
-            self._global_nodes.empty[y:y+sy, x:x+sx] = False
-            self._global_nodes.color_A[y:y+sy, x:x+sx] = B
+            self._global_nodes.empty[ty:ty+sy, tx:tx+sx] = False
+            self._global_nodes.color_A[ty:ty+sy, tx:tx+sx] = B
             return True
-        elif non_overlaps == 0 and is_filling:
+        elif non_overlaps == 0 and mask is None:
             # all overlap, but in filling mode (We only allow this case in refinement)
             warnings.warn("Trying to fill on an already filled area")
             return False
 
         # partially overlap, do as described in the paper
-        A = self._global_nodes.color_A[y: y+sy, x:x+sx]
+        A = self._global_nodes.color_A[ty: ty+sy, tx:tx+sx]
         A_gr_x, A_gr_y = self.get_gradient(A)
-        A2 = self._global_nodes.color_B[y: y+sy, x:x+sx]  # A2 is another old patch (if present)
+        A2 = self._global_nodes.color_B[ty: ty+sy, tx:tx+sx]  # A2 is another old patch (if present)
         A2_gr_x, A2_gr_y = self.get_gradient(A2)
 
         # build graph
 
         G = maxflow.Graph[float](sx * sy, 2 * ((sx - 1) * (sy - 1) * 2 + sx + sy - 2))
-        G.add_nodes(sx * sy)
+        G_indices = G.add_grid_nodes((sx, sy))
 
         color_diff_AB = self.rgb_l1_dist(A, B)
         color_diff_A2B = self.rgb_l1_dist(A2, B)
 
         seam_nodes = []
 
-        to_graph_idx = lambda i, j : i + j * sx
+        to_graph_idx = lambda i, j : G_indices[i, j]
 
 
         for j in range(sy):
             for i in range(sx):
                 if i < sx - 1:
                     s, t = to_graph_idx(i, j), to_graph_idx(i + 1, j)
-                    if not self._global_nodes[j + y, i + x].empty and not self._global_nodes[j + y, i + x + 1].empty:
-                        if self._global_nodes[j + y, i + x].on_seam_right:
+                    if not self._global_nodes[j + ty, i + tx].empty and not self._global_nodes[j + ty, i + tx + 1].empty:
+                        if self._global_nodes[j + ty, i + tx].on_seam_right:
                             # old seam present !!
                             ##             New Patch B
                             ##                  |
                             ##  (curr)        cap1
                             ##    ||            |
                             ##     A -- cap2 -- + -- cap3 -- A2     +: the seam node
-                            cap1 = self._global_nodes[j + y, i + x].right_cost  # memorized old cut
+                            cap1 = self._global_nodes[j + ty, i + tx].right_cost  # memorized old cut
                             
                             grad = A_gr_x[j, i] + A2_gr_x[j, i + 1] + B_gr_x[j, i] + B_gr_x[j, i + 1] + 1.
                             cap2 = (color_diff_AB[j, i] + color_diff_A2B[j, i + 1]) / grad
@@ -478,17 +510,17 @@ class GraphCut:
                             cap = (color_diff_AB[j, i] + color_diff_AB[j, i + 1]) / grad
                             cap += self._MIN_CAP
                             G.add_edge(s, t, cap, cap)
-                            self._global_nodes[j + y, i + x].right_cost = cap
+                            self._global_nodes[j + ty, i + tx].right_cost = cap
                     else:
                         cap = 0.0
                         G.add_edge(s, t, cap, cap)
-                        self._global_nodes[j + y, i + x].right_cost = cap
+                        self._global_nodes[j + ty, i + tx].right_cost = cap
                 if j < sy - 1:
                     s, t = to_graph_idx(i, j), to_graph_idx(i, j + 1)
-                    if not self._global_nodes[j + y, i + x].empty and not self._global_nodes[j + y + 1, i + x].empty:
-                        if self._global_nodes[j + y, i + x].on_seam_bottom:
+                    if not self._global_nodes[j + ty, i + tx].empty and not self._global_nodes[j + ty + 1, i + tx].empty:
+                        if self._global_nodes[j + ty, i + tx].on_seam_bottom:
                             # old seam present, similar to the above codes
-                            cap1 = self._global_nodes[j + y, i + x].bottom_cost  # memorized old cut
+                            cap1 = self._global_nodes[j + ty, i + tx].bottom_cost  # memorized old cut
                             
                             grad = A_gr_y[j, i] + A2_gr_y[j + 1, i] + B_gr_y[j, i] + B_gr_y[j + 1, i] + 1.
                             cap2 = (color_diff_AB[j, i] + color_diff_A2B[j + 1, i]) / grad
@@ -504,11 +536,11 @@ class GraphCut:
                             cap = (color_diff_AB[j, i] + color_diff_AB[j + 1, i]) / grad
                             cap += self._MIN_CAP
                             G.add_edge(s, t, cap, cap)
-                            self._global_nodes[j + y, i + x].bottom_cost = cap
+                            self._global_nodes[j + ty, i + tx].bottom_cost = cap
                     else:
                         cap = 0.0
                         G.add_edge(s, t, cap, cap)
-                        self._global_nodes[j + y, i + x].bottom_cost = cap
+                        self._global_nodes[j + ty, i + tx].bottom_cost = cap
 
         ## add seam nodes to graph
         for seam_node in seam_nodes:
@@ -520,41 +552,33 @@ class GraphCut:
         
         for i in range(sx):
             j = 0
-            if not self._global_nodes[y + j, x + i].empty:
+            if not self._global_nodes[ty + j, tx + i].empty:
                 G.add_tedge(to_graph_idx(i, j), self._INFTY, 0.0)
             j = sy - 1
-            if not self._global_nodes[y + j, x + i].empty:
+            if not self._global_nodes[ty + j, tx + i].empty:
                 G.add_tedge(to_graph_idx(i, j), self._INFTY, 0.0)
         
         for j in range(sy):
             i = 0
-            if not self._global_nodes[y + j, x + i].empty:
+            if not self._global_nodes[ty + j, tx + i].empty:
                 G.add_tedge(to_graph_idx(i, j), self._INFTY, 0.0)
             i = sx - 1
-            if not self._global_nodes[y + j, x + i].empty:
+            if not self._global_nodes[ty + j, tx + i].empty:
                 G.add_tedge(to_graph_idx(i, j), self._INFTY, 0.0)
 
-        if is_filling:
+        if mask is None:
             for j in range(sy):
                 for i in range(sx):
                     neighbors = [(i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)]
                     for nb in neighbors:
                         ni, nj = nb
-                        if 0 <= y + nj < self._output_h and 0 <= x + ni < self._output_w and self._global_nodes[y + nj, x + ni].empty:
+                        if 0 <= ty + nj < self._output_h and 0 <= tx + ni < self._output_w and self._global_nodes[ty + nj, tx + ni].empty:
                             G.add_tedge(to_graph_idx(i, j), 0.0, self._INFTY)
                             break
         else:
             # refinement case, add edge from center of the new patch B
-            out_x, out_y = input_x + tx, input_y + ty
-            v1x, v1y = max(0, out_x), max(0, out_y)
-            v2x, v2y = min(self._output_w, out_x + radius), min(self._output_h, out_y + radius)
-            out_x, out_y = v1x, v1y
-            input_x, input_y = out_x - tx, out_y - ty
-
-            for j in range(v2y - v1y):
-                for i in range(v2x - v1x):
-                    if input_x + i > 0 and input_y + j > 0:
-                        G.add_tedge(to_graph_idx(input_x + i, input_y + j), 0.0, self._INFTY)
+            for j, i in zip(*np.nonzero(mask)):
+                G.add_tedge(to_graph_idx(i, j), 0.0, self._INFTY)
         
         flow = G.maxflow()
 
@@ -569,10 +593,10 @@ class GraphCut:
                 idx = to_graph_idx(i, j)
                 if i < sx - 1:
                     if G.get_segment(idx) ^ G.get_segment(to_graph_idx(i + 1, j)):
-                        self._global_nodes[j + y, i + x].on_new_seam = True
+                        self._global_nodes[j + ty, i + tx].on_new_seam = True
                 if j < sy - 1:
                     if G.get_segment(idx) ^ G.get_segment(to_graph_idx(i, j + 1)):
-                        self._global_nodes[j + y, i + x].on_new_seam = True
+                        self._global_nodes[j + ty, i + tx].on_new_seam = True
                 if len(seam_nodes) > 0 and k < len(seam_nodes) and idx == seam_nodes[k].start:
                     cur_seam = seam_nodes[k].seam
                     cur_end = seam_nodes[k].end
@@ -586,48 +610,49 @@ class GraphCut:
                         if G.get_segment(cur_end) ^ G.get_segment(cur_seam):
                             attr_name = 'c3'
                         if seam_nodes[k].orientation == 'right':
-                            self._global_nodes[j + y, i + x].right_cost = getattr(seam_nodes[k], attr_name)
-                            self._global_nodes[j + y, i + x].set_seam(flow, 'right')
+                            self._global_nodes[j + ty, i + tx].right_cost = getattr(seam_nodes[k], attr_name)
+                            self._global_nodes[j + ty, i + tx].set_seam(flow, 'right')
                         else:
-                            self._global_nodes[j + y, i + x].bottom_cost = getattr(seam_nodes[k], attr_name)
-                            self._global_nodes[j + y, i + x].set_seam(flow, 'bottom')
+                            self._global_nodes[j + ty, i + tx].bottom_cost = getattr(seam_nodes[k], attr_name)
+                            self._global_nodes[j + ty, i + tx].set_seam(flow, 'bottom')
                     elif G.get_segment(cur_seam) == SOURCE:
                         # old seam with old cost
                         attr_name = 'c1'
                         if seam_nodes[k].orientation == 'right':
-                            self._global_nodes[j + y, i + x].right_cost = getattr(seam_nodes[k], attr_name)
-                            self._global_nodes[j + y, i + x].set_seam(flow, 'right')
+                            self._global_nodes[j + ty, i + tx].right_cost = getattr(seam_nodes[k], attr_name)
+                            self._global_nodes[j + ty, i + tx].set_seam(flow, 'right')
                         else:
-                            self._global_nodes[j + y, i + x].bottom_cost = getattr(seam_nodes[k], attr_name)
-                            self._global_nodes[j + y, i + x].set_seam(flow, 'bottom')
+                            self._global_nodes[j + ty, i + tx].bottom_cost = getattr(seam_nodes[k], attr_name)
+                            self._global_nodes[j + ty, i + tx].set_seam(flow, 'bottom')
                     k += 1
                 else:
                     # new seam
                     if i < sx - 1:
                         if G.get_segment(idx) ^ G.get_segment(to_graph_idx(i + 1, j)):
-                            self._global_nodes[j + y, i + x].set_seam(flow, 'right')
+                            self._global_nodes[j + ty, i + tx].set_seam(flow, 'right')
                     if j < sy - 1:
                         if G.get_segment(idx) ^ G.get_segment(to_graph_idx(i, j + 1)):
-                            self._global_nodes[j + y, i + x].set_seam(flow, 'bottom')
+                            self._global_nodes[j + ty, i + tx].set_seam(flow, 'bottom')
 
         for j in range(sy):
             for i in range(sx):
-                if self._global_nodes[j + y, i + x].empty:
-                    self._global_nodes[j + y, i + x].set_color(B[j, i])
+                if self._global_nodes[j + ty, i + tx].empty:
+                    self._global_nodes[j + ty, i + tx].set_color(B[j, i])
                 else:
-                    if G.get_segment(to_graph_idx(i, j)) == SOURCE:
+                    segment = G.get_segment(to_graph_idx(i, j))
+                    if segment == SOURCE:
                         # copy from old_patch
-                        self._global_nodes[j + y, i + x].color_B = B[j, i]
-                    else:
+                        self._global_nodes[j + ty, i + tx].color_B = B[j, i]
+                    elif segment == SINK:
                         # copy from new patch
-                        self._global_nodes[j + y, i + x].color_B = self._global_nodes[j + y, i + x].color_A
-                        self._global_nodes[j + y, i + x].set_color(B[j, i])
+                        self._global_nodes[j + ty, i + tx].color_B = self._global_nodes[j + ty, i + tx].color_A
+                        self._global_nodes[j + ty, i + tx].set_color(B[j, i])
 
-                        if not self._global_nodes[j + y, i + x].on_new_seam:
-                            self._global_nodes[j + y, i + x].on_seam_right = False
-                            self._global_nodes[j + y, i + x].on_seam_bottom = False
+                        if not self._global_nodes[j + ty, i + tx].on_new_seam:
+                            self._global_nodes[j + ty, i + tx].on_seam_right = False
+                            self._global_nodes[j + ty, i + tx].on_seam_bottom = False
                 
-                self._global_nodes[j + y, i + x].on_new_seam = False
+                self._global_nodes[j + ty, i + tx].on_new_seam = False
                     
 
         return True

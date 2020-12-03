@@ -13,7 +13,7 @@ if __name__ == '__main__':
     parser.add_argument('-overlap_x', help='Overlap X for fill', type=int, default=-1)
     parser.add_argument('-overlap_y', help='Overlap Y for fill', type=int, default=-1)
     parser.add_argument('-refine', help='Refinement rounds', type=int, default=0)
-    parser.add_argument('-radius', help='Refinement radius', type=int, default=3)
+    parser.add_argument('-diameter', help='Refinement diameter', type=int, default=3)
     args = parser.parse_args()
 
     im = np.array(Image.open(args.im).convert('RGB'))
@@ -35,6 +35,8 @@ if __name__ == '__main__':
     cnt = args.refine
     while cnt > 0:
         cnt -= 1
-        blender.refinement(args.radius)
+        blender.refinement(args.diameter)
+        output = blender._global_nodes.color_A.copy()
+        blender.on_output(output)
     blender.on_output(blender.output)
 
