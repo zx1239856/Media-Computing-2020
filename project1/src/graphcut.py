@@ -124,10 +124,10 @@ class GraphCut:
             i_min = np.min(arr)
             i_max = np.max(arr)
             return x_min + (arr - i_min) * (x_max - x_min) / (i_max - i_min + 1e-5)
-        return rescale(np.gradient(img, axis=1), 0, 255) / 255., rescale(np.gradient(img, axis=0), 0, 255) / 255.
+        return rescale(np.abs(np.gradient(img, axis=1)), 0, 255) / 255., rescale(np.abs(np.gradient(img, axis=0)), 0, 255) / 255.
 
     @staticmethod
-    def rgb_l1_dist(src, dst):
+    def rgb_dist(src, dst):
         return np.linalg.norm((dst - src) / 255., axis=-1)
 
     
@@ -474,8 +474,8 @@ class GraphCut:
         G = maxflow.Graph[float](sx * sy, 2 * ((sx - 1) * (sy - 1) * 2 + sx + sy - 2))
         G_indices = G.add_grid_nodes((sx, sy))
 
-        color_diff_AB = self.rgb_l1_dist(A, B)
-        color_diff_A2B = self.rgb_l1_dist(A2, B)
+        color_diff_AB = self.rgb_dist(A, B)
+        color_diff_A2B = self.rgb_dist(A2, B)
 
         seam_nodes = []
 
@@ -570,8 +570,7 @@ class GraphCut:
             for j in range(sy):
                 for i in range(sx):
                     neighbors = [(i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)]
-                    for nb in neighbors:
-                        ni, nj = nb
+                    for ni, nj in neighbors:
                         if 0 <= ty + nj < self._output_h and 0 <= tx + ni < self._output_w and self._global_nodes[ty + nj, tx + ni].empty:
                             G.add_tedge(to_graph_idx(i, j), 0.0, self._INFTY)
                             break

@@ -42,9 +42,16 @@ if __name__ == '__main__':
     parser.add_argument('-input', help='Input image dir', type=str, required=True)
     args = parser.parse_args()
 
+    def is_num(fname):
+        try:
+            int(fname.split('.')[0])
+        except:
+            return False
+        return True
+
     imread = lambda x : cv2.cvtColor(cv2.imread(x), cv2.COLOR_BGR2RGB)
 
-    img_files = [file for file in Path(args.input).iterdir() if not file.name.startswith('.') and not file.name.startswith('H')]
+    img_files = [file for file in Path(args.input).iterdir() if is_num(file.name)]
     assert len(img_files) >= 2
     ext_name = img_files[0].suffix
     print(f"Processing {len(img_files)} imgs")
@@ -102,12 +109,18 @@ if __name__ == '__main__':
     result = np.zeros((height, width, imgs[0].shape[-1]), dtype=imgs[0].dtype)
     result[:imgs[0].shape[0], :imgs[0].shape[1]] = imgs[0]
     transformed = []
+    transformed_mask = []
     for i in range(len(img_files)):
         if i == 0:
             trans = result
+            mask = np.zeros(result.shape[:-1] + (1,), dtype=result.dtype)
+            mask[:imgs[0].shape[0], :imgs[0].shape[1]] = 255
         else:
             trans = cv2.warpPerspective(imgs[i], new_Hs[i - 1], (width, height))
+            mask = np.ones(imgs[i].shape[:-1] + (1,), dtype=imgs[i].dtype) * 255
+            mask = cv2.warpPerspective(mask, new_Hs[i - 1], (width, height))
         cv2.imwrite(str(Path(args.input) / f'{i:02}_trans.jpg'), cv2.cvtColor(trans, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(Path(args.input) / f'{i:02}_trans_mask.jpg'), mask)
         transformed.append(trans)
     result = np.max(np.array(transformed), axis=0)
     plt.figure(figsize=(20,10))
