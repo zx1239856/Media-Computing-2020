@@ -1,7 +1,6 @@
 from argparse import ArgumentParser
 from PIL import Image
 import numpy as np
-from numpy.testing._private.utils import assert_string_equal
 from graphcut import GraphCut
 
 if __name__ == '__main__':

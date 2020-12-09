@@ -94,7 +94,7 @@ class GraphCut:
         self._output_h, self._output_w = out_size
         self._global_nodes = PixelNodeSet(*out_size)
         self._INFTY = float('inf')
-        self._MIN_CAP = 1e-10
+        self._MIN_CAP = 1e-5
         self._patch_cnt = 0
         self._is_filled = False
         self._max_err_node_idx = -1

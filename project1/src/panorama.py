@@ -112,11 +112,11 @@ def calc_flow(src, dst, src_cons, dst_cons, overlap):
         s = G_indices[j, i]
         if j + 1 < h and overlap[j + 1, i]: # down
             t = G_indices[j + 1, i]
-            M = c_dif[j, i] + c_dif[j + 1, i] / (s_grad_y[j, i] + s_grad_y[j + 1, i] + d_grad_y[j, i] + d_grad_y[j + 1, i] + 1.)
+            M = (c_dif[j, i] + c_dif[j + 1, i] + 1e-5) / (s_grad_y[j, i] + s_grad_y[j + 1, i] + d_grad_y[j, i] + d_grad_y[j + 1, i] + 1.)
             G.add_edge(s, t, M, M)
         if i + 1 < w and overlap[j, i + 1]: # right
             t = G_indices[j, i + 1]
-            M = c_dif[j, i] + c_dif[j, i + 1] / (s_grad_x[j, i] + s_grad_x[j, i + 1] + d_grad_x[j, i] + d_grad_x[j, i + 1] + 1.)
+            M = (c_dif[j, i] + c_dif[j, i + 1] + 1e-5) / (s_grad_x[j, i] + s_grad_x[j, i + 1] + d_grad_x[j, i] + d_grad_x[j, i + 1] + 1.)
             G.add_edge(s, t, M, M)
         if src_cons[j, i] and not dst_cons[j, i]:
             G.add_tedge(s, INFTY, 0.0)
@@ -159,29 +159,32 @@ def output(src, dst, src_mask, dst_mask, overlap, G, G_indices):
             t_seg = G.get_segment(t)
             if s_seg != t_seg:
                 is_seam[j, i:i+2] = 1
-    is_seam_ = np.tile(is_seam[..., None], [1, 1, 3])
-    out_ = out.copy()
-    out_[is_seam_] = 255
+    out_seam = out.copy()
+    out_seam[is_seam, :] = [0, 255, 255]
 
     out_poisson = poisson(dst, src, dst_mask, src_mask)
 
-    plt.figure(figsize=(10, 10))
-    plt.subplot(2, 2, 1)
+    plt.figure(figsize=(12, 4))
+    plt.subplot(2, 3, 1)
+    plt.tight_layout()
+    plt.axis('off')
+    plt.imshow(cv2.cvtColor(out_seam, cv2.COLOR_BGR2RGB))
+    plt.subplot(2, 3, 2)
     plt.tight_layout()
     plt.axis('off')
     plt.imshow(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
-    plt.subplot(2, 2, 3)
-    plt.tight_layout()
-    plt.axis('off')
-    plt.imshow((src_mask * 255).astype(np.uint8))
-    plt.subplot(2, 2, 4)
-    plt.tight_layout()
-    plt.axis('off')
-    plt.imshow((dst_mask * 255).astype(np.uint8))
-    plt.subplot(2, 2, 2)
+    plt.subplot(2, 3, 3)
     plt.tight_layout()
     plt.axis('off')
     plt.imshow(cv2.cvtColor(out_poisson, cv2.COLOR_BGR2RGB))
+    plt.subplot(2, 3, 4)
+    plt.tight_layout()
+    plt.axis('off')
+    plt.imshow((src_mask * 255).astype(np.uint8))
+    plt.subplot(2, 3, 5)
+    plt.tight_layout()
+    plt.axis('off')
+    plt.imshow((dst_mask * 255).astype(np.uint8))
     plt.show()
     return out, src_mask, dst_mask
 
