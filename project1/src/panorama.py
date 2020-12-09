@@ -4,11 +4,13 @@ from PIL import Image, ImageOps
 import cv2
 import numpy as np
 import maxflow
-import matplotlib.pyplot as plt
 from scipy.sparse import linalg
 import scipy.sparse as sp
 import scipy.ndimage as nd
 from numba import jit
+import threading
+import os
+import PySimpleGUI as sg
 
 ## Poisson matting
 def laplacian(im):
@@ -127,7 +129,7 @@ def calc_flow(src, dst, src_cons, dst_cons, overlap):
     return G, G_indices
 
 
-def output(src, dst, src_mask, dst_mask, overlap, G, G_indices):
+def output(src, dst, src_mask, dst_mask, overlap, G, G_indices, is_seam=None):
     out = np.zeros_like(src)
     src_only = np.tile((src_mask & ~overlap)[..., None], [1, 1, 3])
     dst_only = np.tile((dst_mask & ~overlap)[..., None], [1, 1, 3])
@@ -139,7 +141,8 @@ def output(src, dst, src_mask, dst_mask, overlap, G, G_indices):
     
     SOURCE, SINK = 0, 1
     h, w = src.shape[:-1]
-    is_seam = np.zeros_like(src_mask)
+    if is_seam is None:
+        is_seam = np.zeros_like(src_mask)
     for j, i in zip(*np.where(overlap)):
         s = G_indices[j, i]
         s_seg = G.get_segment(s)
@@ -153,48 +156,69 @@ def output(src, dst, src_mask, dst_mask, overlap, G, G_indices):
             t = G_indices[j + 1, i]
             t_seg = G.get_segment(t)
             if s_seg != t_seg:
-                is_seam[j:j+2, i] = 1
+                is_seam[max(0, j-2):j+2, i] = 1
         if i + 1 < w and overlap[j, i + 1]:
             t = G_indices[j, i + 1]
             t_seg = G.get_segment(t)
             if s_seg != t_seg:
-                is_seam[j, i:i+2] = 1
+                is_seam[j, max(0, i-2):i+2] = 1
+
     out_seam = out.copy()
     out_seam[is_seam, :] = [0, 255, 255]
 
     out_poisson = poisson(dst, src, dst_mask, src_mask)
 
-    plt.figure(figsize=(12, 4))
-    plt.subplot(2, 3, 1)
-    plt.tight_layout()
-    plt.axis('off')
-    plt.imshow(cv2.cvtColor(out_seam, cv2.COLOR_BGR2RGB))
-    plt.subplot(2, 3, 2)
-    plt.tight_layout()
-    plt.axis('off')
-    plt.imshow(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
-    plt.subplot(2, 3, 3)
-    plt.tight_layout()
-    plt.axis('off')
-    plt.imshow(cv2.cvtColor(out_poisson, cv2.COLOR_BGR2RGB))
-    plt.subplot(2, 3, 4)
-    plt.tight_layout()
-    plt.axis('off')
-    plt.imshow((src_mask * 255).astype(np.uint8))
-    plt.subplot(2, 3, 5)
-    plt.tight_layout()
-    plt.axis('off')
-    plt.imshow((dst_mask * 255).astype(np.uint8))
-    plt.show()
-    return out, src_mask, dst_mask
+    return out_seam, out, out_poisson, src_mask, dst_mask, is_seam
 
 
+out_seam = None
+out = None
+out_poisson = None
+_src_mask = None
+_dst_mask = None 
+is_seam = None
+current_N = 1
+src = None
+dst = None
+src_mask = None
+dst_mask = None
+input_dir = None
+ext_name = None
+save_path = None
+
+def worker_thread():
+    global out_seam, out, out_poisson, _src_mask, _dst_mask, is_seam, current_N, src_mask, dst_mask, src, dst
+    global input_dir, ext_name
+    for i in range(1, N):
+        dst = cv2.imread(str(input_dir / f'{i:02}_trans{ext_name}'))
+        dst_mask = cv2.imread(str(input_dir / f'{i:02}_trans_mask{ext_name}'), cv2.IMREAD_GRAYSCALE)
+        assert dst is not None and dst_mask is not None
+        dst_mask = dst_mask.squeeze() > 0
+
+        overlap_mask = src_mask & dst_mask
+        union_mask = src_mask | dst_mask
+        src_cons = edge_contraint(src_mask, overlap_mask)
+        dst_cons = edge_contraint(dst_mask, overlap_mask)
+
+        G, G_indices = calc_flow(src, dst, src_cons, dst_cons, overlap_mask)
+        out_seam, out, out_poisson, _src_mask, _dst_mask, is_seam = output(src, dst, src_mask, dst_mask, overlap_mask, G, G_indices, is_seam)
+        cv2.imwrite(str(save_path / f'seam_{i}.png'), out_seam)
+        cv2.imwrite(str(save_path / f'out_{i}.png'), out)
+        cv2.imwrite(str(save_path / f'out_poisson_{i}.png'), out_poisson)
+        src = out
+        src_mask = union_mask
+
+        current_N = i + 1
 
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('-input', help='Input image dir', type=str, required=True)
+    parser.add_argument('-output', help='Output image dir', type=str, required=True)
     args = parser.parse_args()
     input_dir = Path(args.input)
+
+    os.makedirs(args.output, exist_ok=True)
+    save_path = Path(args.output)
 
     def is_num(fname):
         try:
@@ -212,20 +236,45 @@ if __name__ == '__main__':
     assert src is not None and src_mask is not None
     src_mask = src_mask.squeeze() > 0
 
-    for i in range(1, N):
-        dst = cv2.imread(str(input_dir / f'{i:02}_trans{ext_name}'))
-        dst_mask = cv2.imread(str(input_dir / f'{i:02}_trans_mask{ext_name}'), cv2.IMREAD_GRAYSCALE)
-        assert dst is not None and dst_mask is not None
-        dst_mask = dst_mask.squeeze() > 0
+    out_seam = np.zeros_like(src)
+    out = src.copy()
+    out_poisson = src.copy()
+    _src_mask = np.zeros_like(src_mask)
+    _dst_mask = np.zeros_like(src_mask)
+    is_seam = np.zeros_like(src_mask)
 
-        overlap_mask = src_mask & dst_mask
-        union_mask = src_mask | dst_mask
-        src_cons = edge_contraint(src_mask, overlap_mask)
-        dst_cons = edge_contraint(dst_mask, overlap_mask)
+    sg.theme("LightBlue6")
 
-        G, G_indices = calc_flow(src, dst, src_cons, dst_cons, overlap_mask)
-        out = output(src, dst, src_mask, dst_mask, overlap_mask, G, G_indices)[0]
-        src = out
-        src_mask = union_mask
+    IMG_SIZE = (600, 338)
+
+    layout = [
+        [sg.Frame("Seam", [[sg.Image(filename="", key="-SEAM-", size=IMG_SIZE)]]), sg.Frame("Output", [[sg.Image(filename="", key="-OUT-", size=IMG_SIZE)]]), sg.Frame("Output Poisson", [[sg.Image(filename="", key="-OUT_POISSON-", size=IMG_SIZE)]])],
+        [sg.Frame("L mask", [[sg.Image(filename="", key="-SRC_MASK-", size=IMG_SIZE)]]), sg.Frame("R mask", [[sg.Image(filename="", key="-DST_MASK-", size=IMG_SIZE)]]), sg.Column(
+            [
+                [sg.Text("Current Progress: ")],
+                [sg.ProgressBar(N, orientation="horizontal", key="-PROG-", size=(60, 20))],
+            ], size=IMG_SIZE)
+        ],
+    ]
+    window = sg.Window("Panorama Stitching", layout, size=(1900, 750))
+
+    worker = threading.Thread(target=worker_thread, daemon=True)
+    worker.start()
+
+    while True:
+        event, values = window.read(timeout=20)
+
+        window["-SEAM-"].update(data=cv2.imencode(".png", cv2.resize(out_seam, IMG_SIZE))[1].tobytes())
+        window["-OUT-"].update(data=cv2.imencode(".png", cv2.resize(out, IMG_SIZE))[1].tobytes())
+        window["-OUT_POISSON-"].update(data=cv2.imencode(".png", cv2.resize(out_poisson, IMG_SIZE))[1].tobytes())
+        window["-SRC_MASK-"].update(data=cv2.imencode(".png", cv2.resize(np.array(_src_mask * 255, dtype=np.uint8)[..., None], IMG_SIZE))[1].tobytes())
+        window["-DST_MASK-"].update(data=cv2.imencode(".png", cv2.resize(np.array(_dst_mask * 255, dtype=np.uint8)[..., None], IMG_SIZE))[1].tobytes())
+        window["-PROG-"].update_bar(current_N)
+
+        if event == sg.WIN_CLOSED:
+            break
+
+    window.close()
+    exit(0)
         
 

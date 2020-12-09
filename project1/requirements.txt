@@ -1,3 +1,7 @@
 pillow
 numpy
 PyMaxFlow
+PySimpleGUI
+matplotlib
+scipy
+opencv-python-headless
