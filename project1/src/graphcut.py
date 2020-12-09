@@ -86,6 +86,11 @@ class SeamNode:
         self.seam = -1
 
 class GraphCut:
+    def set_patch(self, im):
+        self._input = np.copy(im)
+        self._input_gradient_x, self._input_gradient_y = self.get_gradient(im)
+        self._input_h, self._input_w = im.shape[:2]
+
     def __init__(self, im, out_size):
         self._input = np.copy(im)
         self._input_gradient_x, self._input_gradient_y = self.get_gradient(im)
@@ -114,7 +119,7 @@ class GraphCut:
 
     @property
     def output(self):
-        return self._global_nodes.color_A.copy()
+        return np.clip(np.round(self._global_nodes.color_A.copy()), 0, 255).astype(np.uint8)
 
     @staticmethod
     def get_gradient(img):
@@ -653,5 +658,4 @@ class GraphCut:
                 
                 self._global_nodes[j + ty, i + tx].on_new_seam = False
                     
-
         return True

@@ -40,6 +40,7 @@ def compute_homography(kpts_a, kpts_b, matches, reproj_thres):
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('-input', help='Input image dir', type=str, required=True)
+    parser.add_argument('-output', help='Path to output image', type=str, default=None)
     args = parser.parse_args()
 
     def is_num(fname):
@@ -123,6 +124,10 @@ if __name__ == '__main__':
         cv2.imwrite(str(Path(args.input) / f'{i:02}_trans_mask.jpg'), mask)
         transformed.append(trans)
     result = np.max(np.array(transformed), axis=0)
+
+    if args.output is not None:
+        cv2.imwrite(args.output, cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+
     plt.figure(figsize=(20,10))
     plt.imshow(result)
     plt.axis('off')
