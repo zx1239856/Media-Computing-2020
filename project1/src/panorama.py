@@ -5,9 +5,77 @@ import cv2
 import numpy as np
 import maxflow
 import matplotlib.pyplot as plt
+from scipy.sparse import linalg
+import scipy.sparse as sp
+import scipy.ndimage as nd
+from numba import jit
+
+## Poisson matting
+def laplacian(im):
+    laplacian_kernel = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]])
+    conv =  nd.convolve(im, laplacian_kernel, mode='constant')    
+    return conv
+
+@jit
+def make_rcd(im_shape, mask):
+    sizey, sizex = im_shape
+    r = []
+    c = []
+    d = []
+    for j in range(sizey):
+        for i in range(sizex):
+            m = j * sizex + i
+            r.append(m)
+            c.append(m)
+            d.append(4)
+            if j - 1 >= 0 and mask[j - 1, i]:
+                r.append(m)
+                c.append(m - sizex)
+                d.append(-1)
+            if j + 1 < sizey and mask[j + 1, i]:
+                r.append(m)
+                c.append(m + sizex)
+                d.append(-1)
+            if i - 1 >= 0 and mask[j, i - 1]:
+                r.append(m)
+                c.append(m - 1)
+                d.append(-1)
+            if i + 1 < sizex and mask[j, i + 1]:
+                r.append(m)
+                c.append(m + 1)
+                d.append(-1)
+    return np.array(r), np.array(c), np.array(d)
+
+
+def build_sys_sparse(im_shape, mask):
+    sizey, sizex= im_shape
+    size = sizey * sizex
+    r, c, d = make_rcd(im_shape, mask)
+    A = sp.coo_matrix((d, (r, c)), shape=(size, size))
+    A = A.tocsr()
+    return A
+
+def poisson(L, R, L_mask, R_mask):
+    A = build_sys_sparse(L.shape[:-1], L_mask)
+    L = L / 255.
+    R = R / 255.
+    all_res = []
+    for ch in range(L.shape[-1]):
+        b = (laplacian(L[..., ch]) * L_mask).flatten()
+        b_edge = (laplacian(R[..., ch] * R_mask) * L_mask).flatten()
+        b -= b_edge
+        res = linalg.spsolve(A, b)
+        res = np.clip(res.reshape(L.shape[:2]), 0, 1)
+        all_res.append(res)
+    result = np.dstack(all_res)
+    result *= L_mask[..., None]
+    result += (R * R_mask[..., None])
+    result = np.clip(np.round(result * 255.).astype(int), 0, 255).astype(np.uint8)
+    return result
 
 INFTY = float('inf')
 
+@jit
 def edge_contraint(in_mask, overlap_mask):
     res = np.zeros_like(in_mask)
     h, w = in_mask.shape[:2]
@@ -65,6 +133,10 @@ def output(src, dst, src_mask, dst_mask, overlap, G, G_indices):
     dst_only = np.tile((dst_mask & ~overlap)[..., None], [1, 1, 3])
     out[src_only] = src[src_only]
     out[dst_only] = dst[dst_only]
+
+    src_mask = src_mask & ~overlap
+    dst_mask = dst_mask & ~overlap
+    
     SOURCE, SINK = 0, 1
     h, w = src.shape[:-1]
     is_seam = np.zeros_like(src_mask)
@@ -73,8 +145,10 @@ def output(src, dst, src_mask, dst_mask, overlap, G, G_indices):
         s_seg = G.get_segment(s)
         if s_seg == SOURCE:
             out[j, i] = src[j, i]
+            src_mask[j, i] = True
         elif s_seg == SINK:
             out[j, i] = dst[j, i]
+            dst_mask[j, i] = True
         if j + 1 < h and overlap[j + 1, i]:
             t = G_indices[j + 1, i]
             t_seg = G.get_segment(t)
@@ -89,11 +163,27 @@ def output(src, dst, src_mask, dst_mask, overlap, G, G_indices):
     out_ = out.copy()
     out_[is_seam_] = 255
 
-    plt.figure(figsize=(20,10))
-    plt.imshow(cv2.cvtColor(out_, cv2.COLOR_BGR2RGB))
+    out_poisson = poisson(dst, src, dst_mask, src_mask)
+
+    plt.figure(figsize=(10, 10))
+    plt.subplot(2, 2, 1)
+    plt.tight_layout()
     plt.axis('off')
+    plt.imshow(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+    plt.subplot(2, 2, 3)
+    plt.tight_layout()
+    plt.axis('off')
+    plt.imshow((src_mask * 255).astype(np.uint8))
+    plt.subplot(2, 2, 4)
+    plt.tight_layout()
+    plt.axis('off')
+    plt.imshow((dst_mask * 255).astype(np.uint8))
+    plt.subplot(2, 2, 2)
+    plt.tight_layout()
+    plt.axis('off')
+    plt.imshow(cv2.cvtColor(out_poisson, cv2.COLOR_BGR2RGB))
     plt.show()
-    return out
+    return out, src_mask, dst_mask
 
 
 
@@ -131,7 +221,7 @@ if __name__ == '__main__':
         dst_cons = edge_contraint(dst_mask, overlap_mask)
 
         G, G_indices = calc_flow(src, dst, src_cons, dst_cons, overlap_mask)
-        out = output(src, dst, src_mask, dst_mask, overlap_mask, G, G_indices)
+        out = output(src, dst, src_mask, dst_mask, overlap_mask, G, G_indices)[0]
         src = out
         src_mask = union_mask
         
