@@ -3,9 +3,9 @@ import numpy as np
 import maxflow
 import warnings
 import matplotlib.pyplot as plt
-from numpy import fft
 from numpy.lib.utils import deprecate
 from scipy.signal import fftconvolve
+from pathlib import Path
 
 class AttrCtrl:
     def __init__(self):
@@ -243,12 +243,13 @@ class GraphCut:
                     if 0 <= rr < self._output_h and 0 <= cc < self._output_w:
                         out_img[rr, cc] = [255, 255, 0]
 
-    def on_output(self, output, is_final_output=False):
+    def on_output(self, output, save_path=None, prefix=''):
         plt.figure(figsize=(32, 10))
         plt.subplot(1, 3, 1)
         plt.tight_layout()
         plt.axis('off')
-        plt.imshow(output.astype(np.uint8))
+        out_orig = output.astype(np.uint8)
+        plt.imshow(out_orig)
         self.draw_seams(output)
         plt.subplot(1, 3, 2)
         plt.tight_layout()
@@ -271,6 +272,13 @@ class GraphCut:
                         err_map[j, i] = err
         max_err = np.max(err_map)
         err_map /= max_err if max_err > 1e-2 else 1
+
+        if save_path is not None:
+            base = Path(save_path)
+            Image.fromarray(out_orig).save(base / f'{prefix}out.png')
+            Image.fromarray(output.astype(np.uint8)).save(base / f'{prefix}out_seam.png')
+            Image.fromarray(np.clip(np.round(err_map * 255), 0, 255).astype(np.uint8)).save(base / f'{prefix}seam_err.png')
+
         plt.imshow(err_map)
         plt.show()
     

@@ -2,6 +2,7 @@ from argparse import ArgumentParser
 from PIL import Image
 import numpy as np
 from graphcut import GraphCut
+from pathlib import Path
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -13,6 +14,7 @@ if __name__ == '__main__':
     parser.add_argument('-overlap_y', help='Overlap Y for fill', type=int, default=-1)
     parser.add_argument('-refine', help='Refinement rounds', type=int, default=0)
     parser.add_argument('-diameter', help='Refinement diameter', type=int, default=3)
+    parser.add_argument('-output', help='Output dir', type=str, default=None)
     args = parser.parse_args()
 
     im = np.array(Image.open(args.im).convert('RGB'))
@@ -37,5 +39,6 @@ if __name__ == '__main__':
         blender.refinement(args.diameter)
         output = blender._global_nodes.color_A.copy()
         blender.on_output(output)
-    blender.on_output(blender.output)
+    
+    blender.on_output(blender.output, save_path=args.output, prefix=Path(args.im).stem + f'_{args.placer}_')
 
