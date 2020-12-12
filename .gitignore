@@ -1,6 +1,7 @@
-**/report.md
-**/report.pdf
-**/screenshot/
+/**/report.md
+/**/report.pdf
+/**/screenshot/
+/**/doc/
 # General
 .vscode
 .DS_Store
