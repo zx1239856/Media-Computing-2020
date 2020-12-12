@@ -1,6 +1,4 @@
 from pathlib import Path
-
-from numpy.core.numeric import True_
 from graphcut import GraphCut
 from argparse import ArgumentParser
 from PIL import Image, ImageDraw

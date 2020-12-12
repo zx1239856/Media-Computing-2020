@@ -15,6 +15,7 @@ if __name__ == '__main__':
     parser.add_argument('-refine', help='Refinement rounds', type=int, default=0)
     parser.add_argument('-diameter', help='Refinement diameter', type=int, default=3)
     parser.add_argument('-output', help='Output dir', type=str, default=None)
+    parser.add_argument('-no_grad', action='store_true', default=False)
     args = parser.parse_args()
 
     im = np.array(Image.open(args.im).convert('RGB'))
@@ -23,7 +24,7 @@ if __name__ == '__main__':
     assert args.refine >= 0
     res_h = int(round(h * args.h_ratio))
     res_w = int(round(w * args.w_ratio))
-    blender = GraphCut(im, (res_h, res_w))
+    blender = GraphCut(im, (res_h, res_w), use_grad=not args.no_grad)
 
     step_x, step_y = w // 3, h // 3
     if args.overlap_x > 0 and args.overlap_y > 0:

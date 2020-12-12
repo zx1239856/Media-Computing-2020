@@ -91,7 +91,7 @@ class GraphCut:
         self._input_gradient_x, self._input_gradient_y = self.get_gradient(im)
         self._input_h, self._input_w = im.shape[:2]
 
-    def __init__(self, im, out_size):
+    def __init__(self, im, out_size, use_grad=True):
         self._input = np.copy(im)
         self._input_gradient_x, self._input_gradient_y = self.get_gradient(im)
 
@@ -116,6 +116,7 @@ class GraphCut:
 
         ## visualization params
         self.seam_size = 1
+        self.use_grad = use_grad
 
     @property
     def output(self):
@@ -509,17 +510,26 @@ class GraphCut:
                             ##     A -- cap2 -- + -- cap3 -- A2     +: the seam node
                             cap1 = self._global_nodes[j + ty, i + tx].right_cost  # memorized old cut
                             
-                            grad = A_gr_x[j, i] + A2_gr_x[j, i + 1] + B_gr_x[j, i] + B_gr_x[j, i + 1] + 1.
+                            if self.use_grad:
+                                grad = A_gr_x[j, i] + A2_gr_x[j, i + 1] + B_gr_x[j, i] + B_gr_x[j, i + 1] + 1.
+                            else:
+                                grad = 1.
                             cap2 = (color_diff_AB[j, i] + color_diff_A2B[j, i + 1]) / grad
                             cap2 += self._MIN_CAP
 
-                            grad = A2_gr_x[j, i] + A_gr_x[j, i + 1] + B_gr_x[j, i] + B_gr_x[j, i + 1] + 1.
+                            if self.use_grad:
+                                grad = A2_gr_x[j, i] + A_gr_x[j, i + 1] + B_gr_x[j, i] + B_gr_x[j, i + 1] + 1.
+                            else:
+                                grad = 1.
                             cap3 = (color_diff_A2B[j, i] + color_diff_AB[j, i + 1]) / grad
                             cap3 += self._MIN_CAP
 
                             seam_nodes.append(SeamNode(s, t, cap1, cap2, cap3, 'right'))
                         else:
-                            grad = A_gr_x[j, i] + A_gr_x[j, i + 1] + B_gr_x[j, i] + B_gr_x[j, i + 1] + 1.
+                            if self.use_grad:
+                                grad = A_gr_x[j, i] + A_gr_x[j, i + 1] + B_gr_x[j, i] + B_gr_x[j, i + 1] + 1.
+                            else:
+                                grad = 1.
                             cap = (color_diff_AB[j, i] + color_diff_AB[j, i + 1]) / grad
                             cap += self._MIN_CAP
                             G.add_edge(s, t, cap, cap)
@@ -535,17 +545,26 @@ class GraphCut:
                             # old seam present, similar to the above codes
                             cap1 = self._global_nodes[j + ty, i + tx].bottom_cost  # memorized old cut
                             
-                            grad = A_gr_y[j, i] + A2_gr_y[j + 1, i] + B_gr_y[j, i] + B_gr_y[j + 1, i] + 1.
+                            if self.use_grad:
+                                grad = A_gr_y[j, i] + A2_gr_y[j + 1, i] + B_gr_y[j, i] + B_gr_y[j + 1, i] + 1.
+                            else:
+                                grad = 1.
                             cap2 = (color_diff_AB[j, i] + color_diff_A2B[j + 1, i]) / grad
                             cap2 += self._MIN_CAP
 
-                            grad = A2_gr_y[j, i] + A_gr_y[j + 1, i] + B_gr_y[j, i] + B_gr_y[j + 1, i] + 1.
+                            if self.use_grad:
+                                grad = A2_gr_y[j, i] + A_gr_y[j + 1, i] + B_gr_y[j, i] + B_gr_y[j + 1, i] + 1.
+                            else:
+                                grad = 1.
                             cap3 = (color_diff_A2B[j, i] + color_diff_AB[j + 1, i]) / grad
                             cap3 += self._MIN_CAP
 
                             seam_nodes.append(SeamNode(s, t, cap1, cap2, cap3, 'bottom'))
                         else:
-                            grad = A_gr_y[j, i] + A_gr_y[j + 1, i] + B_gr_y[j, i] + B_gr_y[j + 1, i] + 1.
+                            if self.use_grad:
+                                grad = A_gr_y[j, i] + A_gr_y[j + 1, i] + B_gr_y[j, i] + B_gr_y[j + 1, i] + 1.
+                            else:
+                                grad = 1.
                             cap = (color_diff_AB[j, i] + color_diff_AB[j + 1, i]) / grad
                             cap += self._MIN_CAP
                             G.add_edge(s, t, cap, cap)
