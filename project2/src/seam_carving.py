@@ -361,44 +361,56 @@ def _build_sys_sparse(im_shape, mask):
     return A
 
 
-def poisson_resize_width(gray, lap, ref, dw, energy_type):
-    assert dw <= 0
-    if dw == 0:
-        return lap
+def _gen_idx_mat(size):
+    h, w = size
+    i = np.arange(0, h)[..., None].repeat(w, axis=1)
+    j = np.arange(0, w)[None, ...].repeat(h, axis=0)
+    return np.dstack([i, j])
 
-    h, w = gray.shape
-    row_indices = np.arange(0, h, dtype=np.int32)
-    indices = np.arange(0, w, dtype=np.int32)[None, ...].repeat(h, axis=0)
-    
-    for _ in tqdm(range(abs(dw))):
-        
-        energy = get_energy(gray, energy_type, None)
-        seam, _min_cost = get_single_seam(energy)
+def _mask_from_indices(size, indices):
+    mask = np.zeros(size, dtype=np.bool)
+    indices = np.array(indices).T.tolist()
+    mask[tuple(indices)] = True
+    return mask
 
-        [row_indices, indices[row_indices, seam]]
+@jit(forceobj=True)
+def _poisson_boundary_cond(src, indices, lap):
+    h, w = src.shape[:2]
+    hh, ww = indices.shape[:2]
+    res = lap.copy()
+    for r in range(hh):
+        for c in range(ww):
+            curr = indices[r, c]
+            color = src[curr[0], curr[1]]
+            if r == 0 and curr[0] != 0:
+                res[curr[0], curr[1]] += color
+            if r + 1 == hh and curr[0] + 1 != h:
+                res[curr[0], curr[1]] += color
+            if c == 0 and curr[1] != 0:
+                res[curr[0], curr[1]] += color
+            if c + 1 == ww and curr[1] + 1 != w:
+                res[curr[0], curr[1]] += color
+            if r + 1 < hh:
+                down = indices[r + 1, c]
+                if curr[0] + 1 != down[0] or curr[1] != down[1]:
+                    res[curr[0], curr[1]] += color
+                    res[down[0], down[1]] += color
+            if c + 1 < ww:
+                right = indices[r, c + 1]
+                if curr[0] != right[0] or curr[1] + 1 != right[1]:
+                    res[curr[0], curr[1]] += color
+                    res[right[0], right[1]] += color
+    # check outer
 
-        seam_mask = mask_from_seam(gray, seam)
-        gray = remove_single_seam(gray, seam_mask)
-        lap = remove_single_seam(lap, seam_mask)
-        ref = remove_single_seam(ref, seam_mask)
-        l_bnd = ref[row_indices, seam - 1]
-        r_bnd = ref[row_indices, seam + 1]
-        lap[row_indices, seam - 1] += l_bnd
-        lap[row_indices, seam] += r_bnd - l_bnd
-        indices = remove_single_seam(indices, seam_mask)
+    return res
 
-        # !fix boundary conditions
-
-    
-    return gray, lap, ref
 
 def poisson_resize(src, size, energy_type, keep_mask=None, order='width_first'):
     """Operates on gradient domain, and use poisson solver to rebuild image
     """
-    assert size[0] <= src.shape[0] and size[1] <= src.shape[1], "Poisson solver only supports downscale"
+    h, w = src.shape[:2]
+    assert size[0] <= h and size[1] <= w, "Poisson solver only supports downscale"
     assert order in ['width_first', 'height_first'], "Poisson solver only supports naive order"
-
-    gray = bgr2gray(src)
 
     def Laplacian_dim2(im):
         laplacian_kernel = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]])
@@ -415,27 +427,31 @@ def poisson_resize(src, size, energy_type, keep_mask=None, order='width_first'):
             return np.dstack(res)
 
     lap = Laplacian(src / 255.)
-    if order == 'width_first':
-        gray, lap, src = poisson_resize_width(gray, lap, src, size[1] - src.shape[1], energy_type)
-    else:
-        pass
+    indices = _gen_idx_mat((h, w))
+
+    _, indices = resize([src, indices], size, energy_type, keep_mask, order)
+
+    mask = _mask_from_indices((h, w), indices)
+    print("Fix boundary condition for Poisson")
+    lap = _poisson_boundary_cond(src / 255., indices, lap)
+    lap[~mask] = 0
     
-    mask = np.ones(lap.shape[:2], dtype=np.bool)
     A = _build_sys_sparse(lap.shape[:2], mask)
+    print("Build coefficient matrix done, start solving poisson equation")
     all_res = []
     for ch in range(lap.shape[2]):
         b = lap[..., ch].flatten()
         res = linalg.spsolve(A, b)
         all_res.append(res.reshape(lap.shape[:2]))
 
-    res = np.round(np.clip(np.dstack(all_res), 0, 1) * 255).astype(np.uint8)
-
-    import matplotlib.pyplot as plt
-    plt.imshow(cv2.cvtColor(res, cv2.COLOR_BGR2RGB))
-    plt.show()
-    # target_shape = list(src.shape)
-    # target_shape[0] = size[0]
-    # target_shape[1] = size[1]
-    # res = res[mask].reshape(target_shape)
-    return res
+    res = np.clip(np.round(np.dstack(all_res) * 255), 0, 255).astype(np.uint8)
+    print("Solve done!")
+    
+    target_shape = list(src.shape)
+    target_shape[0] = size[0]
+    target_shape[1] = size[1]
+    res_collated = np.zeros(target_shape, dtype=np.uint8)
+    target_indices = _gen_idx_mat(size)
+    res_collated[tuple(target_indices.T.tolist())] = res[tuple(indices.T.tolist())]
+    return res_collated
     

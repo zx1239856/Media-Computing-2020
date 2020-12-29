@@ -18,6 +18,7 @@ if __name__ == '__main__':
     parser.add_argument('--rm_mask', help="Mask of the part to remove (only in REMOVE op)", default="")
     parser.add_argument('--out', help="Output file (optional)", default="")
     parser.add_argument('--vis', help="Visualization", action="store_true", default=False)
+    parser.add_argument('--poisson', help="Carve in gradient domain using Poisson Solver", action="store_true", default=False)
 
     args = parser.parse_args()
 
@@ -29,12 +30,14 @@ if __name__ == '__main__':
     if mask is not None:
         mask = mask > MASK_THRES
 
+    resize_func = resize if not args.poisson else poisson_resize
     if args.op == 'resize':
         print(f"Current image size: H {src.shape[0]}, W {src.shape[1]}")
         d_height = int(input("Please input a new height: "))
         d_width = int(input("Please input a new width: "))
-        output = resize(src, (d_height, d_width), args.energy, mask, args.order)
+        output = resize_func(src, (d_height, d_width), args.energy, mask, args.order)
     else:
+        # TODO: object removal
         rm_mask = cv2.imread(args.rm_mask, 0)
         assert rm_mask is not None
         rm_mask = rm_mask > MASK_THRES
@@ -47,8 +50,4 @@ if __name__ == '__main__':
         plt.tight_layout()
         plt.axis('off')
         plt.imshow(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
-        # plt.subplot(1, 2, 2)
-        # plt.tight_layout()
-        # plt.axis('off')
-        # plt.imshow(output.astype(np.uint8))
         plt.show()
