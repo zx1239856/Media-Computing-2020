@@ -14,8 +14,8 @@ if __name__ == '__main__':
     parser.add_argument('--op', help="Operation (resize, remove)", default="resize", choices=["resize", "remove"])
     parser.add_argument('--energy', help="Energy type", default="forward", choices=["forward", "backward", "hog"])
     parser.add_argument('--order', help="Operation order", default="width_first", choices=["width_first", "height_first", "optimal"])
-    parser.add_argument('--mask', help="Protective mask of the image", default="")
-    parser.add_argument('--rm_mask', help="Mask of the part to remove (only in REMOVE op)", default="")
+    parser.add_argument('--keep', help="Protective mask of the image", default="")
+    parser.add_argument('--drop', help="Mask of the part to remove (only in REMOVE op)", default="")
     parser.add_argument('--out', help="Output file (optional)", default="")
     parser.add_argument('--vis', help="Visualization", action="store_true", default=False)
     parser.add_argument('--poisson', help="Carve in gradient domain using Poisson Solver", action="store_true", default=False)
@@ -26,21 +26,21 @@ if __name__ == '__main__':
 
     src = cv2.imread(args.src)
     assert src is not None
-    mask = cv2.imread(args.mask, 0) if args.mask else None
-    if mask is not None:
-        mask = mask > MASK_THRES
+    keep = cv2.imread(args.keep, 0) if args.keep else None
+    if keep is not None:
+        keep = keep > MASK_THRES
 
     resize_func = resize if not args.poisson else poisson_resize
     if args.op == 'resize':
         print(f"Current image size: H {src.shape[0]}, W {src.shape[1]}")
         d_height = int(input("Please input a new height: "))
         d_width = int(input("Please input a new width: "))
-        output = resize_func(src, (d_height, d_width), args.energy, mask, args.order)
+        output = resize_func(src, (d_height, d_width), args.energy, keep, args.order)
     else:
         # TODO: object removal
-        rm_mask = cv2.imread(args.rm_mask, 0)
-        assert rm_mask is not None
-        rm_mask = rm_mask > MASK_THRES
+        drop = cv2.imread(args.drop, 0)
+        assert drop is not None
+        drop = drop > MASK_THRES
         output = None
     if args.out:
         cv2.imwrite(args.out, output)

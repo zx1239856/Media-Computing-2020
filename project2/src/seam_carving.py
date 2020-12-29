@@ -181,28 +181,35 @@ def _expand_from_mask(src, mask, target_size):
 
 
 def resize_width(src_list, dw, energy_type, keep_mask=None, progress=True):
+    if isinstance(src_list, list):
+        assert len(src_list) > 0
+        src = src_list[0]
+        gray = bgr2gray(src)
+    else:
+        gray = bgr2gray(src_list)
+
+    if dw > 0:
+        seams_mask = get_seams(gray, dw, energy_type, keep_mask, progress)
+    elif dw < 0:
+        seams_mask = get_seams(gray, -dw, energy_type, keep_mask, progress)
+    else:
+        seams_mask = None
+
     def single_forward(item):
         target_size = list(item.shape)
         target_size[1] += dw
         if dw > 0:
-            seams_mask = get_seams(gray, dw, energy_type, keep_mask, progress)
             dst = _expand_from_mask(item, seams_mask, target_size)
             return dst
         elif dw < 0:
-            seams_mask = get_seams(gray, -dw, energy_type, keep_mask, progress)
             return item[~seams_mask].reshape(target_size)
         else:
             return item
 
     if isinstance(src_list, list):
-        assert len(src_list) > 0
-        src = src_list[0]
-        gray = bgr2gray(src)
         return [single_forward(item) for item in src_list]
     else:
-        src = src_list
-        gray = bgr2gray(src)
-        return single_forward(src)
+        return single_forward(src_list)
 
 
 def resize_height(src_list, dh, energy_type, keep_mask=None, progress=True):
