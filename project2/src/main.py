@@ -1,6 +1,6 @@
 import argparse
 import cv2
-from seam_carving import resize, poisson_resize
+from seam_carving import resize, remove_object, poisson_wrapper
 try:
     import matplotlib.pyplot as plt
 except:
@@ -15,7 +15,7 @@ if __name__ == '__main__':
     parser.add_argument('--energy', help="Energy type", default="forward", choices=["forward", "backward", "hog"])
     parser.add_argument('--order', help="Operation order", default="width_first", choices=["width_first", "height_first", "optimal"])
     parser.add_argument('--keep', help="Protective mask of the image", default="")
-    parser.add_argument('--drop', help="Mask of the part to remove (only in REMOVE op)", default="")
+    parser.add_argument('--remove', help="Mask of the part to remove (only in REMOVE op)", default="")
     parser.add_argument('--out', help="Output file (optional)", default="")
     parser.add_argument('--vis', help="Visualization", action="store_true", default=False)
     parser.add_argument('--poisson', help="Carve in gradient domain using Poisson Solver", action="store_true", default=False)
@@ -30,18 +30,22 @@ if __name__ == '__main__':
     if keep is not None:
         keep = keep > MASK_THRES
 
-    resize_func = resize if not args.poisson else poisson_resize
+    op_map = {'resize': resize, 'remove': remove_object}
+
+    resize_func = op_map[args.op] 
+    if args.poisson:
+        resize_func = poisson_wrapper(resize_func)
+
     if args.op == 'resize':
         print(f"Current image size: H {src.shape[0]}, W {src.shape[1]}")
         d_height = int(input("Please input a new height: "))
         d_width = int(input("Please input a new width: "))
         output = resize_func(src, (d_height, d_width), args.energy, keep, args.order)
     else:
-        # TODO: object removal
-        drop = cv2.imread(args.drop, 0)
-        assert drop is not None
-        drop = drop > MASK_THRES
-        output = None
+        remove = cv2.imread(args.remove, 0)
+        assert remove is not None
+        remove = remove > MASK_THRES
+        output = resize_func(src, args.energy, remove, keep)
     if args.out:
         cv2.imwrite(args.out, output)
     if args.vis and 'plt' in globals():

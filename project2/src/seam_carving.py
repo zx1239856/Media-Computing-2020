@@ -1,3 +1,4 @@
+from numba.cuda import args
 import numpy as np
 import cv2
 from tqdm import tqdm
@@ -7,6 +8,7 @@ import scipy.sparse as sp
 from scipy.sparse import linalg
 
 PROTECT_MASK_ENERGY = 1E6
+REMOVE_MASK_ENERGY = 100 * PROTECT_MASK_ENERGY
 
 
 def remove_single_seam(src, seam_mask):
@@ -328,6 +330,62 @@ def resize(src, size, energy_type, keep_mask=None, order='width_first'):
     return dst
 
 
+def remove_object(src, energy_type, remove_mask, keep_mask=None):
+    if isinstance(src, list):
+        src_ = src[0]
+    else:
+        src_ = src
+
+    h, w = src_.shape[:2]
+    assert src_.shape[:2] == remove_mask.shape
+    if keep_mask is not None:
+        assert remove_mask.shape == keep_mask.shape
+
+    gray = bgr2gray(src_)
+    seams_mask = np.zeros((h, w), dtype=np.bool)
+    row_indices = np.arange(0, h, dtype=np.int32)
+    indices = np.arange(0, w, dtype=np.int32)[None, ...].repeat(h, axis=0)
+ 
+    total=np.count_nonzero(remove_mask)
+    pbar = tqdm(total=total)
+    prev = total
+    while remove_mask.any():
+        energy = get_energy(gray, energy_type, keep_mask)
+        energy[remove_mask] -= REMOVE_MASK_ENERGY
+
+        seam, _min_cost = get_single_seam(energy)
+        seams_mask[row_indices, indices[row_indices, seam]] = True
+        seam_mask = mask_from_seam(gray, seam)
+
+        indices = remove_single_seam(indices, seam_mask)
+        gray = remove_single_seam(gray, seam_mask)
+        remove_mask = remove_single_seam(remove_mask, seam_mask)
+        if keep_mask is not None:
+            keep_mask = remove_single_seam(keep_mask, seam_mask)
+
+        cnt = np.count_nonzero(remove_mask)
+        pbar.update(prev - cnt)
+        prev = cnt
+
+        w -= 1
+
+    def reducer(img, seams_mask, target_size):
+        size = list(img.shape)
+        size[0] = target_size[0]
+        size[1] = target_size[1]
+        return img[~seams_mask].reshape(size)
+
+    t_size = (h, w)
+    
+    if isinstance(src, list):
+        return [reducer(item, seams_mask, t_size) for item in src]
+    else:
+        return reducer(src, seams_mask, t_size)
+    
+
+
+## Carving via Poisson Solver
+
 @jit
 def _get_coo_indices(size_y, size_x, mask):
     flat_idx = lambda i, j : i * size_x + j
@@ -407,58 +465,70 @@ def _poisson_boundary_cond(src, indices, lap):
                 if curr[0] != right[0] or curr[1] + 1 != right[1]:
                     res[curr[0], curr[1]] += color
                     res[right[0], right[1]] += color
-    # check outer
-
     return res
 
 
-def poisson_resize(src, size, energy_type, keep_mask=None, order='width_first'):
-    """Operates on gradient domain, and use poisson solver to rebuild image
-    """
-    h, w = src.shape[:2]
-    assert size[0] <= h and size[1] <= w, "Poisson solver only supports downscale"
-    assert order in ['width_first', 'height_first'], "Poisson solver only supports naive order"
+def poisson_wrapper(resize_func):
+    import inspect
 
-    def Laplacian_dim2(im):
-        laplacian_kernel = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]])
-        conv =  convolve(im, laplacian_kernel, mode='constant')
-        return conv
+    def inner(*args, **kwargs):
+        bound_args = inspect.getcallargs(resize_func, *args, **kwargs)
+        assert 'src' in bound_args.keys()
+        src = bound_args['src']
+        h, w = src.shape[:2]
 
-    def Laplacian(im):
-        if im.ndim == 2:
-            return Laplacian_dim2(im)
+        if 'size' in bound_args.keys():
+            size = bound_args['size']
+            assert size[0] <= h and size[1] <= w, "Poisson solver only supports downscale"
         else:
-            res = []
-            for ch in range(im.shape[2]):
-                res.append(Laplacian_dim2(im[..., ch]))
-            return np.dstack(res)
+            assert 'remove_mask' in bound_args.keys()
+            size = None
 
-    lap = Laplacian(src / 255.)
-    indices = _gen_idx_mat((h, w))
+        def Laplacian_dim2(im):
+            laplacian_kernel = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]])
+            conv =  convolve(im, laplacian_kernel, mode='constant')
+            return conv
 
-    _, indices = resize([src, indices], size, energy_type, keep_mask, order)
+        def Laplacian(im):
+            if im.ndim == 2:
+                return Laplacian_dim2(im)
+            else:
+                res = []
+                for ch in range(im.shape[2]):
+                    res.append(Laplacian_dim2(im[..., ch]))
+                return np.dstack(res)
 
-    mask = _mask_from_indices((h, w), indices)
-    print("Fix boundary condition for Poisson")
-    lap = _poisson_boundary_cond(src / 255., indices, lap)
-    lap[~mask] = 0
-    
-    A = _build_sys_sparse(lap.shape[:2], mask)
-    print("Build coefficient matrix done, start solving poisson equation")
-    all_res = []
-    for ch in range(lap.shape[2]):
-        b = lap[..., ch].flatten()
-        res = linalg.spsolve(A, b)
-        all_res.append(res.reshape(lap.shape[:2]))
+        lap = Laplacian(src / 255.)
+        indices = _gen_idx_mat((h, w))
 
-    res = np.clip(np.round(np.dstack(all_res) * 255), 0, 255).astype(np.uint8)
-    print("Solve done!")
-    
-    target_shape = list(src.shape)
-    target_shape[0] = size[0]
-    target_shape[1] = size[1]
-    res_collated = np.zeros(target_shape, dtype=np.uint8)
-    target_indices = _gen_idx_mat(size)
-    res_collated[tuple(target_indices.T.tolist())] = res[tuple(indices.T.tolist())]
-    return res_collated
-    
+        bound_args['src'] = [src, indices]
+        _, indices = resize_func(**bound_args)
+
+        mask = _mask_from_indices((h, w), indices)
+        print("Fix boundary condition for Poisson")
+        lap = _poisson_boundary_cond(src / 255., indices, lap)
+        lap[~mask] = 0
+        
+        A = _build_sys_sparse(lap.shape[:2], mask)
+        print("Build coefficient matrix done, start solving poisson equation")
+        all_res = []
+        for ch in range(lap.shape[2]):
+            b = lap[..., ch].flatten()
+            res = linalg.spsolve(A, b)
+            all_res.append(res.reshape(lap.shape[:2]))
+
+        res = np.clip(np.round(np.dstack(all_res) * 255), 0, 255).astype(np.uint8)
+        print("Solve done!")
+
+        if size is None:
+            size = indices.shape[:2]
+        
+        target_shape = list(src.shape)
+        target_shape[0] = size[0]
+        target_shape[1] = size[1]
+        res_collated = np.zeros(target_shape, dtype=np.uint8)
+        target_indices = _gen_idx_mat(size)
+        res_collated[tuple(target_indices.T.tolist())] = res[tuple(indices.T.tolist())]
+        return res_collated
+
+    return inner
