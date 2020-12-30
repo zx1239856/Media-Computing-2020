@@ -1,0 +1,7 @@
+numpy
+matplotlib
+scipy
+opencv-python-headless
+numba
+face_recognition
+tqdm
