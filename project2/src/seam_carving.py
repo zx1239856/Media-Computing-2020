@@ -5,13 +5,11 @@ from numba import jit
 from scipy.ndimage import convolve
 import scipy.sparse as sp
 from scipy.sparse import linalg
-from scipy.ndimage import shift
 from skimage.filters.rank import entropy
 from skimage.morphology import disk
 from skimage.feature import hog
 
-PROTECT_MASK_ENERGY = 1E6
-REMOVE_MASK_ENERGY = 100 * PROTECT_MASK_ENERGY
+MASK_ENERGY = 1E3
 
 
 def remove_single_seam(src, seam_mask):
@@ -24,8 +22,10 @@ def remove_single_seam(src, seam_mask):
         dst = src[seam_mask].reshape(h, w - 1)
     return dst
 
+
 def mask_from_seam(src, seam):
     return ~np.eye(src.shape[1], dtype=np.bool)[seam]
+
 
 def bgr2gray(img):
     return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -39,7 +39,7 @@ def get_entropy_energy(gray, w_size=9):
 
 
 def patchify(img, patch_shape):
-    # Adapted from: 
+    # Adapted from:
     # https://stackoverflow.com/a/16788733
     img = np.ascontiguousarray(img)
     X, Y = img.shape
@@ -49,13 +49,14 @@ def patchify(img, patch_shape):
     return np.lib.stride_tricks.as_strided(img, shape=shape, strides=strides)
 
 
-def get_hog_energy(gray, w_size=11, orient_bins=10):
+def get_hog_energy(gray, w_size=11, orient_bins=8):
     assert gray.ndim == 2
-    energy = get_backward_energy(gray) / 255
+    energy = get_backward_energy(gray)
     gray_pad = np.pad(gray, w_size // 2, mode='edge')
     patches = patchify(gray_pad, (w_size, w_size))
     tot = np.concatenate(np.concatenate(patches, axis=1), axis=1)
-    res = hog(tot, orientations=orient_bins, pixels_per_cell=(w_size, w_size), cells_per_block=(1, 1), feature_vector=False).squeeze()
+    res = hog(tot, orientations=orient_bins, pixels_per_cell=(
+        w_size, w_size), cells_per_block=(1, 1), feature_vector=False).squeeze()
     return np.divide(energy, res.max(-1))
 
 
@@ -109,7 +110,7 @@ ENERGY_FUNC = {
 }
 
 
-@jit(forceobj=True)
+# @jit(forceobj=True)
 def get_single_seam(energy):
     assert energy.ndim == 2
     h, w = energy.shape
@@ -139,8 +140,9 @@ def get_single_seam(energy):
 def get_energy(gray, energy_type, keep_mask=None):
     energy = ENERGY_FUNC[energy_type](gray)
     if keep_mask is not None:
-        energy[keep_mask] += PROTECT_MASK_ENERGY
+        energy[keep_mask] += MASK_ENERGY
     return energy
+
 
 def accumulate_energy(M):
     M = M.copy()
@@ -233,7 +235,7 @@ def resize_height(src_list, dh, energy_type, keep_mask=None, progress=True):
         else:
             src = src.T
         return src
-    
+
     if isinstance(src_list, list):
         assert len(src_list) > 0
         return [single_cvt(item) for item in resize_width([single_cvt(src) for src in src_list], dh, energy_type, keep_mask, progress)]
@@ -256,28 +258,30 @@ def _resize_optimal_impl(src, dw, dh, energy_type, keep_mask=None):
         h, w = _ // (ddw + 1), _ % (ddw + 1)
         if h == 0 and w == 0:
             continue
-        
+
         cost_horiz, cost_vert = np.inf, np.inf
         seam_vert, seam_horiz = None, None
         if w > 0:
             energy = get_energy(mem[h, w - 1], energy_type, keep_mask)
             seam_vert, cost_vert = get_single_seam(energy)
             cost_vert += dp[h, w - 1]
-        
+
         if h > 0:
             energy = get_energy(mem[h - 1, w].T, energy_type, keep_mask)
             seam_horiz, cost_horiz = get_single_seam(energy)
             cost_horiz += dp[h - 1, w]
 
         assert cost_horiz != np.inf or cost_vert != np.inf
-        
+
         if cost_horiz < cost_vert:
             dp[h, w] = cost_horiz
-            mem[h, w] = remove_single_seam(mem[h - 1, w].T, mask_from_seam(mem[h - 1, w].T, seam_horiz)).T
+            mem[h, w] = remove_single_seam(
+                mem[h - 1, w].T, mask_from_seam(mem[h - 1, w].T, seam_horiz)).T
             orient[h, w] = HORIZ
         else:
             dp[h, w] = cost_vert
-            mem[h, w] = remove_single_seam(mem[h, w - 1], mask_from_seam(mem[h, w - 1], seam_vert))
+            mem[h, w] = remove_single_seam(
+                mem[h, w - 1], mask_from_seam(mem[h, w - 1], seam_vert))
             orient[h, w] = VERT
 
     seam_path = []
@@ -288,7 +292,7 @@ def _resize_optimal_impl(src, dw, dh, energy_type, keep_mask=None):
             ww -= 1
         else:
             hh -= 1
-    
+
     assert len(seam_path) == ddw + ddh
     return seam_path, dp
 
@@ -301,17 +305,18 @@ def resize_optimal(src_list, dw, dh, energy_type, keep_mask=None):
 
     seam_path = _resize_optimal_impl(src, dw, dh, energy_type, keep_mask)[0]
     ddw, ddh = np.abs(dw), np.abs(dh)
-    w_step, h_step = dw // ddw, dh // ddh
+    w_step, h_step = dw // ddw if ddw > 0 else 0, dh // ddh if ddh > 0 else 0
     VERT = 1
-    
+
     dst = src_list
     for ori in tqdm(seam_path[::-1]):
         if ori == VERT:
-            dst = resize_width(dst, w_step, energy_type, keep_mask, progress=False)
+            dst = resize_width(dst, w_step, energy_type,
+                               keep_mask, progress=False)
         else:
-            dst = resize_height(dst, h_step, energy_type, keep_mask, progress=False)
+            dst = resize_height(dst, h_step, energy_type,
+                                keep_mask, progress=False)
     return dst
-
 
 
 def resize(src, size, energy_type, keep_mask=None, order='width_first'):
@@ -338,7 +343,8 @@ def resize(src, size, energy_type, keep_mask=None, order='width_first'):
         dst = resize_width(dst, dst_w - src_w, energy_type, keep_mask)
     else:
         # optimal
-        dst = resize_optimal(src, dst_w - src_w, dst_h - src_h, energy_type, keep_mask)
+        dst = resize_optimal(src, dst_w - src_w, dst_h -
+                             src_h, energy_type, keep_mask)
     return dst
 
 
@@ -357,25 +363,24 @@ def remove_object(src, energy_type, remove_mask, keep_mask=None):
     seams_mask = np.zeros((h, w), dtype=np.bool)
     row_indices = np.arange(0, h, dtype=np.int32)
     indices = np.arange(0, w, dtype=np.int32)[None, ...].repeat(h, axis=0)
- 
-    total=np.count_nonzero(remove_mask)
+
+    total = np.count_nonzero(remove_mask)
     pbar = tqdm(total=total)
     prev = total
     while remove_mask.any():
         energy = get_energy(gray, energy_type, keep_mask)
-        energy[remove_mask] -= REMOVE_MASK_ENERGY
+        energy[remove_mask] -= 100 * MASK_ENERGY
 
         seam, _min_cost = get_single_seam(energy)
         seams_mask[row_indices, indices[row_indices, seam]] = True
         seam_mask = mask_from_seam(gray, seam)
-
         indices = remove_single_seam(indices, seam_mask)
         gray = remove_single_seam(gray, seam_mask)
         remove_mask = remove_single_seam(remove_mask, seam_mask)
         if keep_mask is not None:
             keep_mask = remove_single_seam(keep_mask, seam_mask)
 
-        cnt = np.count_nonzero(remove_mask) 
+        cnt = np.count_nonzero(remove_mask)
         pbar.update(prev - cnt)
         prev = cnt
 
@@ -389,19 +394,18 @@ def remove_object(src, energy_type, remove_mask, keep_mask=None):
         return img[~seams_mask].reshape(size)
 
     t_size = (h, w)
-    
+
     if isinstance(src, list):
         return [reducer(item, seams_mask, t_size) for item in src]
     else:
         return reducer(src, seams_mask, t_size)
-    
 
 
-## Carving via Poisson Solver
+# Carving via Poisson Solver
 
 @jit
 def _get_coo_indices(size_y, size_x, mask):
-    flat_idx = lambda i, j : i * size_x + j
+    def flat_idx(i, j): return i * size_x + j
     row = []
     col = []
     data = []
@@ -445,11 +449,13 @@ def _gen_idx_mat(size):
     j = np.arange(0, w)[None, ...].repeat(h, axis=0)
     return np.dstack([i, j])
 
+
 def _mask_from_indices(size, indices):
     mask = np.zeros(size, dtype=np.bool)
     indices = np.array(indices).T.tolist()
     mask[tuple(indices)] = True
     return mask
+
 
 @jit(forceobj=True)
 def _poisson_boundary_cond(src, indices, lap):
@@ -499,7 +505,7 @@ def poisson_wrapper(resize_func):
 
         def Laplacian_dim2(im):
             laplacian_kernel = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]])
-            conv =  convolve(im, laplacian_kernel, mode='constant')
+            conv = convolve(im, laplacian_kernel, mode='constant')
             return conv
 
         def Laplacian(im):
@@ -521,7 +527,7 @@ def poisson_wrapper(resize_func):
         print("Fix boundary condition for Poisson")
         lap = _poisson_boundary_cond(src / 255., indices, lap)
         lap[~mask] = 0
-        
+
         A = _build_sys_sparse(lap.shape[:2], mask)
         print("Build coefficient matrix done, start solving poisson equation")
         all_res = []
@@ -530,18 +536,20 @@ def poisson_wrapper(resize_func):
             res = linalg.spsolve(A, b)
             all_res.append(res.reshape(lap.shape[:2]))
 
-        res = np.clip(np.round(np.dstack(all_res) * 255), 0, 255).astype(np.uint8)
+        res = np.clip(np.round(np.dstack(all_res) * 255),
+                      0, 255).astype(np.uint8)
         print("Solve done!")
 
         if size is None:
             size = indices.shape[:2]
-        
+
         target_shape = list(src.shape)
         target_shape[0] = size[0]
         target_shape[1] = size[1]
         res_collated = np.zeros(target_shape, dtype=np.uint8)
         target_indices = _gen_idx_mat(size)
-        res_collated[tuple(target_indices.T.tolist())] = res[tuple(indices.T.tolist())]
+        res_collated[tuple(target_indices.T.tolist())
+                     ] = res[tuple(indices.T.tolist())]
         return res_collated
 
     return inner
