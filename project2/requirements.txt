@@ -5,3 +5,4 @@ opencv-python-headless
 numba
 face_recognition
 tqdm
+scikit-image

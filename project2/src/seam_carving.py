@@ -5,6 +5,10 @@ from numba import jit
 from scipy.ndimage import convolve
 import scipy.sparse as sp
 from scipy.sparse import linalg
+from scipy.ndimage import shift
+from skimage.filters.rank import entropy
+from skimage.morphology import disk
+from skimage.feature import hog
 
 PROTECT_MASK_ENERGY = 1E6
 REMOVE_MASK_ENERGY = 100 * PROTECT_MASK_ENERGY
@@ -27,36 +31,32 @@ def bgr2gray(img):
     return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
 
-@jit(forceobj=True)
-def get_entropy_energy(gray):
+def get_entropy_energy(gray, w_size=9):
     assert gray.ndim == 2
-    e = get_backward_energy(gray) / 255.
-    w_size = 9
-    pad = np.pad(gray, w_size // 2)
-    h, w = gray.shape
-    for i in range(h):
-        for j in range(w):
-            blk = pad[i:i+w_size, j:j+w_size]
-            p = cv2.calcHist([blk], [0], None, [256], (0, 256)) / blk.size
-            entropy = -(p * np.log(p + 1e-5)).sum()
-            e[i, j] += entropy
-    return e
+    e = get_backward_energy(gray) / 255
+    ent = entropy(gray.astype(np.uint8), disk(w_size))
+    return e + ent
 
 
-@jit(forceobj=True)
-def get_hog_energy(gray):
+def patchify(img, patch_shape):
+    # Adapted from: 
+    # https://stackoverflow.com/a/16788733
+    img = np.ascontiguousarray(img)
+    X, Y = img.shape
+    x, y = patch_shape
+    shape = (X-x+1), (Y-y+1), x, y
+    strides = img.itemsize*np.array([Y, 1, Y, 1])
+    return np.lib.stride_tricks.as_strided(img, shape=shape, strides=strides)
+
+
+def get_hog_energy(gray, w_size=11, orient_bins=10):
     assert gray.ndim == 2
-    e = get_backward_energy(gray)
-    w_size = 11
-    pad = np.pad(e, w_size // 2)
-    h, w = gray.shape
-    for i in range(h):
-        for j in range(w):
-            blk = pad[i:i+w_size, j:j+w_size]
-            max_v = int(blk.max()) + 1
-            p = cv2.calcHist([blk], [0], None, [max_v], (0, max_v))
-            e[i, j] /= p.max()
-    return e
+    energy = get_backward_energy(gray) / 255
+    gray_pad = np.pad(gray, w_size // 2, mode='edge')
+    patches = patchify(gray_pad, (w_size, w_size))
+    tot = np.concatenate(np.concatenate(patches, axis=1), axis=1)
+    res = hog(tot, orientations=orient_bins, pixels_per_cell=(w_size, w_size), cells_per_block=(1, 1), feature_vector=False).squeeze()
+    return np.divide(energy, res.max(-1))
 
 
 def get_backward_energy(gray):
@@ -104,7 +104,8 @@ def get_forward_energy(gray):
 ENERGY_FUNC = {
     "forward": get_forward_energy,
     "backward": get_backward_energy,
-    "hog": get_hog_energy
+    "hog": get_hog_energy,
+    "entropy": get_entropy_energy
 }
 
 
@@ -135,11 +136,23 @@ def get_single_seam(energy):
     return seam, min_cost
 
 
-def get_energy(gray, energy_type, keep_mask):
+def get_energy(gray, energy_type, keep_mask=None):
     energy = ENERGY_FUNC[energy_type](gray)
     if keep_mask is not None:
         energy[keep_mask] += PROTECT_MASK_ENERGY
     return energy
+
+def accumulate_energy(M):
+    M = M.copy()
+    h, w = M.shape
+    offset = np.arange(-1, w - 1)
+    for i in range(1, h):
+        bound = np.array([np.inf])
+        left = np.hstack((bound, M[i-1, :-1]))
+        right = np.hstack((M[i-1, 1:], bound))
+        min_indices = np.argmin([left, M[i-1], right], axis=0) + offset
+        M[i] += M[i-1, min_indices]
+    return M
 
 
 def get_seams(gray, num_seams, energy_type, keep_mask=None, progress=True):
@@ -277,7 +290,7 @@ def _resize_optimal_impl(src, dw, dh, energy_type, keep_mask=None):
             hh -= 1
     
     assert len(seam_path) == ddw + ddh
-    return seam_path
+    return seam_path, dp
 
 
 def resize_optimal(src_list, dw, dh, energy_type, keep_mask=None):
@@ -286,7 +299,7 @@ def resize_optimal(src_list, dw, dh, energy_type, keep_mask=None):
     else:
         src = src_list
 
-    seam_path = _resize_optimal_impl(src, dw, dh, energy_type, keep_mask)
+    seam_path = _resize_optimal_impl(src, dw, dh, energy_type, keep_mask)[0]
     ddw, ddh = np.abs(dw), np.abs(dh)
     w_step, h_step = dw // ddw, dh // ddh
     VERT = 1
@@ -362,11 +375,12 @@ def remove_object(src, energy_type, remove_mask, keep_mask=None):
         if keep_mask is not None:
             keep_mask = remove_single_seam(keep_mask, seam_mask)
 
-        cnt = np.count_nonzero(remove_mask)
+        cnt = np.count_nonzero(remove_mask) 
         pbar.update(prev - cnt)
         prev = cnt
 
         w -= 1
+    pbar.close()
 
     def reducer(img, seams_mask, target_size):
         size = list(img.shape)

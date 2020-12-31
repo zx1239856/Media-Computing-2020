@@ -24,7 +24,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser("Seam carve")
     parser.add_argument('--src', help="Source image", required=True)
     parser.add_argument('--op', help="Operation (resize, remove)", default="resize", choices=["resize", "remove"])
-    parser.add_argument('--energy', help="Energy type", default="forward", choices=["forward", "backward", "hog"])
+    parser.add_argument('--energy', help="Energy type", default="forward", choices=["forward", "backward", "hog", "entropy"])
     parser.add_argument('--order', help="Operation order", default="width_first", choices=["width_first", "height_first", "optimal"])
     parser.add_argument('--keep', help="Protective mask of the image", default="")
     parser.add_argument('--remove', help="Mask of the part to remove (only in REMOVE op)", default="")
